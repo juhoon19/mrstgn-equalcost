@@ -5,8 +5,7 @@ Regenerate the manuscript figures from the saved prediction and result files.
 Output goes to the paper/ directory under the filenames the .tex refers to, so
 rebuilding the manuscript afterwards picks the new figures up.
 
-Not regenerated here: fig1_dataset.png (dataset overview, produced by
-generate_figures_real.py) and fig2_architecture.jpg (drawn by hand).
+Not regenerated here: fig2_architecture.jpg, which is drawn by hand.
 fig11_crosscity.png is supplementary and is not used by the manuscript.
 """
 
@@ -14,6 +13,7 @@ import os
 import json
 import argparse
 
+from datetime import datetime, timedelta
 import numpy as np
 import scipy.io as sio
 import matplotlib
@@ -60,6 +60,81 @@ def scale_fonts(fig_width_in, latex_frac=0.96):
 def load(p, default=None):
     return json.load(open(p, encoding='utf-8')) if os.path.exists(p) else default
 
+
+# ------------------------------------------------------------ dataset overview
+def fig_dataset(mat, start_date='2021-04-01'):
+    """Figure 1. Six views of the primary dataset, all derived from the flow
+    tensor so that a reader with the tensor can regenerate the figure.
+
+    Day of week is taken from the real calendar. Deriving it as t // 24 % 7
+    assumes the study window opens on a Monday; this one opens on a Thursday,
+    and the resulting three-day shift swaps weekdays into the weekend curve.
+    """
+    F = mat['flow_tensor']
+    centers = mat['grid_centers']
+    T = F.shape[0]
+    lat, lng = centers[:, 0], centers[:, 1]
+    hrs = np.arange(T) % 24
+    day = np.arange(T) // 24
+
+    node_total = F.sum(axis=(0, 2))
+    hourly = np.array([F[hrs == h].sum() for h in range(24)])
+    daily = F.reshape(T // 24, 24, F.shape[1], 2).sum(axis=(1, 2, 3))
+
+    base = datetime.strptime(start_date, '%Y-%m-%d').date()
+    dow = np.array([(base + timedelta(days=int(d))).weekday() for d in day])
+    is_we = dow >= 5
+    wd = np.array([F[(hrs == h) & ~is_we].sum() / ((hrs == h) & ~is_we).sum()
+                   for h in range(24)])
+    we = np.array([F[(hrs == h) & is_we].sum() / ((hrs == h) & is_we).sum()
+                   for h in range(24)])
+
+    scale_fonts(13.2, 0.92)
+    fig, axes = plt.subplots(2, 3, figsize=(13.2, 7.2))
+    ax = axes.ravel()
+
+    sc = ax[0].scatter(lng, lat, c=node_total, s=18, cmap='hot_r', linewidths=0)
+    ax[0].set_title('(a) Study area, total flow')
+    ax[0].set_xlabel('Longitude'); ax[0].set_ylabel('Latitude')
+    fig.colorbar(sc, ax=ax[0], shrink=0.85)
+
+    peak = [(7 <= h <= 9) or (17 <= h <= 19) for h in range(24)]
+    ax[1].bar(range(24), hourly,
+              color=[C['alt'] if p else C['geo'] for p in peak], width=0.8)
+    ax[1].set_title('(b) Flow by hour of day')
+    ax[1].set_xlabel('Hour'); ax[1].set_ylabel('Total flow')
+
+    ax[2].hist(node_total, bins=30, color=C['sim'], alpha=0.75)
+    ax[2].axvline(node_total.mean(), color=C['flow'], ls='--', lw=1.4,
+                  label='Mean %.0f' % node_total.mean())
+    ax[2].set_title('(c) Flow per region')
+    ax[2].set_xlabel('Total flow'); ax[2].set_ylabel('Regions')
+    ax[2].set_ylim(0, ax[2].get_ylim()[1] * 1.45)
+    ax[2].legend(frameon=False, loc='upper right')
+
+    ax[3].plot(np.arange(1, len(daily) + 1), daily, lw=1.1, color=C['main'])
+    ax[3].set_title('(d) Daily total, %d days' % len(daily))
+    ax[3].set_xlabel('Day'); ax[3].set_ylabel('Daily flow')
+
+    ax[4].plot(range(24), wd, 'o-', ms=3.5, lw=1.4, color=C['geo'],
+               label='Weekday')
+    ax[4].plot(range(24), we, 's--', ms=3.5, lw=1.4, color=C['flow'],
+               label='Weekend')
+    ax[4].set_title('(e) Weekday vs. weekend')
+    ax[4].set_xlabel('Hour'); ax[4].set_ylabel('Mean hourly flow')
+    ax[4].ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
+    ax[4].set_ylim(0, max(wd.max(), we.max()) * 1.3)
+    ax[4].legend(frameon=False, loc='upper left')
+
+    sc = ax[5].scatter(lng, lat, c=np.log10(np.maximum(node_total, 1)), s=18,
+                       cmap='viridis', linewidths=0)
+    ax[5].set_title('(f) Study area, $\\log_{10}$ flow')
+    ax[5].set_xlabel('Longitude'); ax[5].set_ylabel('Latitude')
+    fig.colorbar(sc, ax=ax[5], shrink=0.85)
+
+    fig.tight_layout(pad=1.4, w_pad=2.0, h_pad=1.6)
+    fig.savefig(os.path.join(OUT, 'fig1_dataset.png'))
+    plt.close(fig)
 
 # ------------------------------------------------------------ the three relational graphs
 def fig_graphs(sz):
@@ -421,13 +496,15 @@ def main():
     ap.add_argument('--mat', default='dataset.mat',
                     help='primary-city dataset, used for the grid centroids')
     args = ap.parse_args()
-    centers = sio.loadmat(args.mat)['grid_centers']
+    mat = sio.loadmat(args.mat)
+    centers = mat['grid_centers']
     sweep = load(os.path.join(HERE, 'sweep_out', 'results.json'), [])
     ab_sz = load(os.path.join(HERE, 'ablation_out', 'results.json'), [])
     ab_ch = load(os.path.join(HERE, 'ablation_chicago', 'results.json'), [])
     mc_sz = load(os.path.join(HERE, 'tables', 'matched_cost.json'))
     mc_ch = load(os.path.join(HERE, 'tables_chicago', 'matched_cost.json'))
 
+    fig_dataset(mat);            print('  fig1_dataset.png')
     fig_graphs(sz);              print('  fig_graph_structures.png')
     fig_scatter(sz);             print('  fig3_scatter.png')
     fig_spatial(sz, centers);    print('  fig4_spatial.png')
