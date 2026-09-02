@@ -1,0 +1,58 @@
+{
+  "Q=5.0h": {
+    "static (no prediction)": {
+      "unmet_rate_pct": 1.3114292127307459,
+      "service_level_pct": 98.68857078726926,
+      "stockout_region_hours_pct": 1.7889733840304183,
+      "pileup_region_hours_pct": 32.78802281368821,
+      "bikes_moved_per_hour": 1.3966343197628148,
+      "bike_km_per_hour": 0.6687268313676054,
+      "bike_km_total": 351.7503132993604
+    },
+    "HA forecast": {
+      "unmet_rate_pct": 1.2114028462092632,
+      "service_level_pct": 98.78859715379073,
+      "stockout_region_hours_pct": 1.7233840304182508,
+      "pileup_region_hours_pct": 31.245247148288975,
+      "bikes_moved_per_hour": 3.2952433547970807,
+      "bike_km_per_hour": 1.5994811069721324,
+      "bike_km_total": 841.3270622673416
+    },
+    "GRU forecast (graph-free)": {
+      "unmet_rate_pct": 1.136781754656291,
+      "service_level_pct": 98.8632182453437,
+      "stockout_region_hours_pct": 1.7661596958174905,
+      "pileup_region_hours_pct": 30.12167300380228,
+      "bikes_moved_per_hour": 4.741844004099074,
+      "bike_km_per_hour": 2.2239338814745766,
+      "bike_km_total": 1169.7892216556272
+    },
+    "MR-STGN mu (point)": {
+      "unmet_rate_pct": 1.0924390221655482,
+      "service_level_pct": 98.90756097783445,
+      "stockout_region_hours_pct": 1.6834600760456273,
+      "pileup_region_hours_pct": 29.264258555133082,
+      "bikes_moved_per_hour": 5.60285942902081,
+      "bike_km_per_hour": 2.6627765637027405,
+      "bike_km_total": 1400.6204725076416
+    },
+    "MR-STGN mu+1.0sigma (risk-aware)": {
+      "unmet_rate_pct": 0.6131559449168056,
+      "service_level_pct": 99.38684405508319,
+      "stockout_region_hours_pct": 1.0114068441064639,
+      "pileup_region_hours_pct": 20.79657794676806,
+      "bikes_moved_per_hour": 19.753724705424435,
+      "bike_km_per_hour": 11.112237889043342,
+      "bike_km_total": 5845.037129636798
+    },
+    "oracle (perfect foresight)": {
+      "unmet_rate_pct": 0.2554046049019375,
+      "service_level_pct": 99.74459539509807,
+      "stockout_region_hours_pct": 0.38022813688212925,
+      "pileup_region_hours_pct": 13.547528517110266,
+      "bikes_moved_per_hour": 34.71863178881331,
+      "bike_km_per_hour": 21.548759666139656,
+      "bike_km_total": 11334.647584389459
+    }
+  }
+}

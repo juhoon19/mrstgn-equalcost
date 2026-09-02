@@ -1,0 +1,38 @@
+{
+  "test": {
+    "MAE": 1.7310848236083984,
+    "RMSE": 2.9690494537353516,
+    "MAPE": 42.00796127319336,
+    "Corr": 0.8943758740045274,
+    "R2": 0.7997387647628784,
+    "WMAPE": 41.864784240722656
+  },
+  "prob": {
+    "NLL": 1.9819393157958984,
+    "PICP50": 56.626425855513304,
+    "MPIW50": 2.9960639476776123,
+    "PICP90": 91.78754752851711,
+    "MPIW90": 7.306487560272217,
+    "PICP95": 94.67490494296578,
+    "MPIW95": 8.706131935119629,
+    "CRPS": 1.2344775199890137
+  },
+  "attn_mean": {
+    "geo": 0.28359800577163696,
+    "flow": 0.20521780848503113,
+    "sim": 0.5111842155456543
+  },
+  "graph": {
+    "sigma_d_km": 3.9539051620949492,
+    "od_source": "TRAIN_PERIOD_od (leakage-free; an earlier version of this label read FULL_PERIOD by mistake — the data were training-period OD throughout)",
+    "k_geo": 8,
+    "K_f": 15,
+    "delta_s": 0.9809,
+    "edges_geo": 1600,
+    "edges_flow": 3000,
+    "edges_sim": 7846
+  },
+  "n_params": 55943,
+  "seed": 42,
+  "epochs_run": 87
+}

@@ -1,0 +1,400 @@
+{
+  "point_scaled": [
+    {
+      "param": 1.0,
+      "unmet_rate_pct": 3.9596097664581507,
+      "service_level_pct": 96.04039023354186,
+      "stockout_region_hours_pct": 9.840304182509506,
+      "pileup_region_hours_pct": 28.848859315589355,
+      "bikes_moved_per_hour": 562.2700146351117,
+      "bike_km_per_hour": 460.3070394994261,
+      "bike_km_total": 242121.50277669812
+    },
+    {
+      "param": 1.25,
+      "unmet_rate_pct": 3.1482327648339385,
+      "service_level_pct": 96.85176723516607,
+      "stockout_region_hours_pct": 5.392585551330799,
+      "pileup_region_hours_pct": 24.232889733840306,
+      "bikes_moved_per_hour": 863.732207896872,
+      "bike_km_per_hour": 1302.5742723277822,
+      "bike_km_total": 685154.0672444134
+    },
+    {
+      "param": 1.5,
+      "unmet_rate_pct": 2.8151283930534796,
+      "service_level_pct": 97.18487160694652,
+      "stockout_region_hours_pct": 3.4420152091254756,
+      "pileup_region_hours_pct": 22.418250950570343,
+      "bikes_moved_per_hour": 975.918272474013,
+      "bike_km_per_hour": 1900.7727959420542,
+      "bike_km_total": 999806.4906655205
+    },
+    {
+      "param": 1.75,
+      "unmet_rate_pct": 2.5727336230670086,
+      "service_level_pct": 97.42726637693299,
+      "stockout_region_hours_pct": 2.9306083650190113,
+      "pileup_region_hours_pct": 20.814638783269963,
+      "bikes_moved_per_hour": 1056.7479168252783,
+      "bike_km_per_hour": 2468.9286763254095,
+      "bike_km_total": 1298656.4837471654
+    },
+    {
+      "param": 2.0,
+      "unmet_rate_pct": 2.401438455638612,
+      "service_level_pct": 97.59856154436139,
+      "stockout_region_hours_pct": 2.7813688212927756,
+      "pileup_region_hours_pct": 21.190114068441066,
+      "bikes_moved_per_hour": 1132.3533243946151,
+      "bike_km_per_hour": 2974.5450233397596,
+      "bike_km_total": 1564610.6822767137
+    },
+    {
+      "param": 2.5,
+      "unmet_rate_pct": 2.187483496748703,
+      "service_level_pct": 97.8125165032513,
+      "stockout_region_hours_pct": 2.594106463878327,
+      "pileup_region_hours_pct": 22.01045627376426,
+      "bikes_moved_per_hour": 1294.3335485024406,
+      "bike_km_per_hour": 3925.3722063346695,
+      "bike_km_total": 2064745.7805320362
+    },
+    {
+      "param": 3.0,
+      "unmet_rate_pct": 2.0250231847640814,
+      "service_level_pct": 97.97497681523592,
+      "stockout_region_hours_pct": 2.51425855513308,
+      "pileup_region_hours_pct": 23.85836501901141,
+      "bikes_moved_per_hour": 1454.5301909642903,
+      "bike_km_per_hour": 4828.629769938104,
+      "bike_km_total": 2539859.2589874426
+    },
+    {
+      "param": 4.0,
+      "unmet_rate_pct": 1.7515477425157984,
+      "service_level_pct": 98.2484522574842,
+      "stockout_region_hours_pct": 2.1844106463878328,
+      "pileup_region_hours_pct": 31.279467680608363,
+      "bikes_moved_per_hour": 1694.4816215201745,
+      "bike_km_per_hour": 6451.723302634135,
+      "bike_km_total": 3393606.457185555
+    },
+    {
+      "param": 5.0,
+      "unmet_rate_pct": 1.5173282612765282,
+      "service_level_pct": 98.48267173872347,
+      "stockout_region_hours_pct": 1.9344106463878328,
+      "pileup_region_hours_pct": 41.80798479087453,
+      "bikes_moved_per_hour": 1855.8569151334846,
+      "bike_km_per_hour": 7566.761106507727,
+      "bike_km_total": 3980116.3420230644
+    },
+    {
+      "param": 6.0,
+      "unmet_rate_pct": 1.363153330090925,
+      "service_level_pct": 98.63684666990908,
+      "stockout_region_hours_pct": 1.8441064638783269,
+      "pileup_region_hours_pct": 52.276615969581755,
+      "bikes_moved_per_hour": 1944.9688672651434,
+      "bike_km_per_hour": 8350.582751312173,
+      "bike_km_total": 4392406.527190203
+    },
+    {
+      "param": 8.0,
+      "unmet_rate_pct": 1.426994780934912,
+      "service_level_pct": 98.5730052190651,
+      "stockout_region_hours_pct": 2.1112167300380227,
+      "pileup_region_hours_pct": 63.4125475285171,
+      "bikes_moved_per_hour": 1967.4250045085369,
+      "bike_km_per_hour": 9557.596045093915,
+      "bike_km_total": 5027295.5197193995
+    }
+  ],
+  "risk": [
+    {
+      "param": 0.0,
+      "unmet_rate_pct": 3.9596097664581507,
+      "service_level_pct": 96.04039023354186,
+      "stockout_region_hours_pct": 9.840304182509506,
+      "pileup_region_hours_pct": 28.848859315589355,
+      "bikes_moved_per_hour": 562.2700146351117,
+      "bike_km_per_hour": 460.3070394994261,
+      "bike_km_total": 242121.50277669812
+    },
+    {
+      "param": 0.5,
+      "unmet_rate_pct": 3.556342343783842,
+      "service_level_pct": 96.44365765621615,
+      "stockout_region_hours_pct": 7.787072243346008,
+      "pileup_region_hours_pct": 26.615019011406844,
+      "bikes_moved_per_hour": 744.3238831371459,
+      "bike_km_per_hour": 779.1041583599073,
+      "bike_km_total": 409808.78729731124
+    },
+    {
+      "param": 1.0,
+      "unmet_rate_pct": 3.2116642254472243,
+      "service_level_pct": 96.78833577455278,
+      "stockout_region_hours_pct": 5.554182509505703,
+      "pileup_region_hours_pct": 24.36977186311787,
+      "bikes_moved_per_hour": 866.5788174444416,
+      "bike_km_per_hour": 1168.1333488413964,
+      "bike_km_total": 614438.1414905745
+    },
+    {
+      "param": 1.5,
+      "unmet_rate_pct": 2.9706239417292504,
+      "service_level_pct": 97.02937605827074,
+      "stockout_region_hours_pct": 4.119771863117871,
+      "pileup_region_hours_pct": 23.2319391634981,
+      "bikes_moved_per_hour": 945.0111468265644,
+      "bike_km_per_hour": 1485.2104911318263,
+      "bike_km_total": 781220.7183353406
+    },
+    {
+      "param": 2.0,
+      "unmet_rate_pct": 2.838946275756223,
+      "service_level_pct": 97.16105372424377,
+      "stockout_region_hours_pct": 3.380228136882129,
+      "pileup_region_hours_pct": 22.080798479087452,
+      "bikes_moved_per_hour": 1002.8199419688833,
+      "bike_km_per_hour": 1759.6737866109777,
+      "bike_km_total": 925588.4117573743
+    },
+    {
+      "param": 2.5,
+      "unmet_rate_pct": 2.7559587992875705,
+      "service_level_pct": 97.24404120071243,
+      "stockout_region_hours_pct": 3.003802281368821,
+      "pileup_region_hours_pct": 21.631178707224336,
+      "bikes_moved_per_hour": 1047.6638404214214,
+      "bike_km_per_hour": 1959.245634004297,
+      "bike_km_total": 1030563.2034862603
+    },
+    {
+      "param": 3.0,
+      "unmet_rate_pct": 2.6507265931772093,
+      "service_level_pct": 97.34927340682279,
+      "stockout_region_hours_pct": 2.6692015209125475,
+      "pileup_region_hours_pct": 21.443916349809886,
+      "bikes_moved_per_hour": 1082.3521263413868,
+      "bike_km_per_hour": 2160.4115467525094,
+      "bike_km_total": 1136376.4735918199
+    },
+    {
+      "param": 4.0,
+      "unmet_rate_pct": 2.493341393095569,
+      "service_level_pct": 97.50665860690442,
+      "stockout_region_hours_pct": 2.452471482889734,
+      "pileup_region_hours_pct": 21.40874524714829,
+      "bikes_moved_per_hour": 1160.871088203888,
+      "bike_km_per_hour": 2520.5820552001996,
+      "bike_km_total": 1325826.1610353051
+    },
+    {
+      "param": 5.0,
+      "unmet_rate_pct": 2.411275603390692,
+      "service_level_pct": 97.58872439660931,
+      "stockout_region_hours_pct": 2.42680608365019,
+      "pileup_region_hours_pct": 21.26235741444867,
+      "bikes_moved_per_hour": 1240.3338012929216,
+      "bike_km_per_hour": 2870.5734533058508,
+      "bike_km_total": 1509921.6364388776
+    },
+    {
+      "param": 6.0,
+      "unmet_rate_pct": 2.3186871489480803,
+      "service_level_pct": 97.68131285105191,
+      "stockout_region_hours_pct": 2.44106463878327,
+      "pileup_region_hours_pct": 21.407794676806084,
+      "bikes_moved_per_hour": 1331.5833022048837,
+      "bike_km_per_hour": 3315.402870267594,
+      "bike_km_total": 1743901.9097607546
+    },
+    {
+      "param": 8.0,
+      "unmet_rate_pct": 2.121956604492063,
+      "service_level_pct": 97.87804339550794,
+      "stockout_region_hours_pct": 2.2813688212927756,
+      "pileup_region_hours_pct": 22.275665399239543,
+      "bikes_moved_per_hour": 1503.3964251290947,
+      "bike_km_per_hour": 4250.281797214795,
+      "bike_km_total": 2235648.2253349824
+    }
+  ],
+  "gru_scaled": [
+    {
+      "param": 1.0,
+      "unmet_rate_pct": 3.952682013896611,
+      "service_level_pct": 96.04731798610338,
+      "stockout_region_hours_pct": 9.399239543726235,
+      "pileup_region_hours_pct": 29.003802281368824,
+      "bikes_moved_per_hour": 598.1597893477403,
+      "bike_km_per_hour": 517.3849060608516,
+      "bike_km_total": 272144.46058800793
+    },
+    {
+      "param": 1.5,
+      "unmet_rate_pct": 2.8095450767834866,
+      "service_level_pct": 97.19045492321652,
+      "stockout_region_hours_pct": 3.5256653992395437,
+      "pileup_region_hours_pct": 21.575095057034222,
+      "bikes_moved_per_hour": 976.9433950563658,
+      "bike_km_per_hour": 2064.26439255881,
+      "bike_km_total": 1085803.0704859341
+    },
+    {
+      "param": 2.0,
+      "unmet_rate_pct": 2.3765568807483666,
+      "service_level_pct": 97.62344311925163,
+      "stockout_region_hours_pct": 2.782319391634981,
+      "pileup_region_hours_pct": 21.155893536121674,
+      "bikes_moved_per_hour": 1133.2675698731155,
+      "bike_km_per_hour": 3262.4518426871496,
+      "bike_km_total": 1716049.6692534406
+    },
+    {
+      "param": 2.5,
+      "unmet_rate_pct": 2.1040968797932043,
+      "service_level_pct": 97.8959031202068,
+      "stockout_region_hours_pct": 2.576996197718631,
+      "pileup_region_hours_pct": 21.980038022813687,
+      "bikes_moved_per_hour": 1298.0864983648544,
+      "bike_km_per_hour": 4179.653281260231,
+      "bike_km_total": 2198497.625942881
+    },
+    {
+      "param": 3.0,
+      "unmet_rate_pct": 1.944783641402169,
+      "service_level_pct": 98.05521635859783,
+      "stockout_region_hours_pct": 2.4306083650190113,
+      "pileup_region_hours_pct": 24.679657794676807,
+      "bikes_moved_per_hour": 1420.4012396732653,
+      "bike_km_per_hour": 4910.885354227374,
+      "bike_km_total": 2583125.6963235987
+    },
+    {
+      "param": 4.0,
+      "unmet_rate_pct": 1.627572516196715,
+      "service_level_pct": 98.37242748380328,
+      "stockout_region_hours_pct": 2.0788973384030416,
+      "pileup_region_hours_pct": 32.0712927756654,
+      "bikes_moved_per_hour": 1654.5103402331085,
+      "bike_km_per_hour": 6223.450109122294,
+      "bike_km_total": 3273534.7573983264
+    },
+    {
+      "param": 5.0,
+      "unmet_rate_pct": 1.4214731748263245,
+      "service_level_pct": 98.57852682517367,
+      "stockout_region_hours_pct": 1.8089353612167303,
+      "pileup_region_hours_pct": 43.217680608365015,
+      "bikes_moved_per_hour": 1824.4604977870683,
+      "bike_km_per_hour": 7407.21238594788,
+      "bike_km_total": 3896193.715008585
+    },
+    {
+      "param": 6.0,
+      "unmet_rate_pct": 1.2695519761772964,
+      "service_level_pct": 98.7304480238227,
+      "stockout_region_hours_pct": 1.7595057034220534,
+      "pileup_region_hours_pct": 53.17205323193917,
+      "bikes_moved_per_hour": 1928.8454281538247,
+      "bike_km_per_hour": 8264.083576430332,
+      "bike_km_total": 4346907.961202354
+    },
+    {
+      "param": 8.0,
+      "unmet_rate_pct": 1.3835402525798768,
+      "service_level_pct": 98.61645974742012,
+      "stockout_region_hours_pct": 1.979087452471483,
+      "pileup_region_hours_pct": 65.50095057034221,
+      "bikes_moved_per_hour": 1970.1806367416418,
+      "bike_km_per_hour": 9484.554401453575,
+      "bike_km_total": 4988875.615164581
+    }
+  ],
+  "static_scaled": [
+    {
+      "param": 1.0,
+      "unmet_rate_pct": 4.863920058957063,
+      "service_level_pct": 95.13607994104294,
+      "stockout_region_hours_pct": 7.243346007604563,
+      "pileup_region_hours_pct": 34.61406844106464,
+      "bikes_moved_per_hour": 248.8278767971957,
+      "bike_km_per_hour": 171.79372331204075,
+      "bike_km_total": 90363.49846213343
+    },
+    {
+      "param": 1.5,
+      "unmet_rate_pct": 4.339813455968097,
+      "service_level_pct": 95.6601865440319,
+      "stockout_region_hours_pct": 5.4610266159695815,
+      "pileup_region_hours_pct": 30.84410646387833,
+      "bikes_moved_per_hour": 609.694465764981,
+      "bike_km_per_hour": 498.75585227671763,
+      "bike_km_total": 262345.57829755347
+    },
+    {
+      "param": 2.0,
+      "unmet_rate_pct": 3.651596603994537,
+      "service_level_pct": 96.34840339600547,
+      "stockout_region_hours_pct": 3.953422053231939,
+      "pileup_region_hours_pct": 26.929657794676803,
+      "bikes_moved_per_hour": 994.605708025348,
+      "bike_km_per_hour": 1227.9245262190989,
+      "bike_km_total": 645888.300791246
+    },
+    {
+      "param": 2.5,
+      "unmet_rate_pct": 3.141494600230225,
+      "service_level_pct": 96.85850539976978,
+      "stockout_region_hours_pct": 3.061787072243346,
+      "pileup_region_hours_pct": 22.10171102661597,
+      "bikes_moved_per_hour": 1357.781971477401,
+      "bike_km_per_hour": 2197.377333603735,
+      "bike_km_total": 1155820.4774755647
+    },
+    {
+      "param": 3.0,
+      "unmet_rate_pct": 2.7131973835538257,
+      "service_level_pct": 97.28680261644618,
+      "stockout_region_hours_pct": 2.612167300380228,
+      "pileup_region_hours_pct": 18.386882129277566,
+      "bikes_moved_per_hour": 1614.9356548571002,
+      "bike_km_per_hour": 3317.587332800073,
+      "bike_km_total": 1745050.9370528385
+    },
+    {
+      "param": 4.0,
+      "unmet_rate_pct": 2.333334883055355,
+      "service_level_pct": 97.66666511694464,
+      "stockout_region_hours_pct": 2.252851711026616,
+      "pileup_region_hours_pct": 13.702471482889733,
+      "bikes_moved_per_hour": 1955.2864487058462,
+      "bike_km_per_hour": 5029.252996662794,
+      "bike_km_total": 2645387.07624463
+    },
+    {
+      "param": 5.0,
+      "unmet_rate_pct": 1.7755529788991957,
+      "service_level_pct": 98.2244470211008,
+      "stockout_region_hours_pct": 1.7138783269961977,
+      "pileup_region_hours_pct": 12.980988593155892,
+      "bikes_moved_per_hour": 2163.5269920112573,
+      "bike_km_per_hour": 6644.572141753515,
+      "bike_km_total": 3495044.946562349
+    },
+    {
+      "param": 6.0,
+      "unmet_rate_pct": 1.3742899314995756,
+      "service_level_pct": 98.62571006850042,
+      "stockout_region_hours_pct": 1.438212927756654,
+      "pileup_region_hours_pct": 16.543726235741445,
+      "bikes_moved_per_hour": 2248.738240613134,
+      "bike_km_per_hour": 7895.323443730477,
+      "bike_km_total": 4152940.131402231
+    }
+  ]
+}

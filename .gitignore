@@ -1,0 +1,24 @@
+# Datasets are not distributed with this repository; see the Data section of
+# the README for how to obtain or rebuild each one.
+*.mat
+*.npz
+data_chicago/
+shanghai_trajectories.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Run artefacts that are regenerated rather than released. The curated
+# records under results/ are tracked deliberately.
+*.log
+*.pdf

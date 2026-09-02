@@ -1,0 +1,170 @@
+{
+  "Q=2.0h": {
+    "static (no prediction)": {
+      "unmet_rate_pct": 5.360650986079504,
+      "service_level_pct": 94.6393490139205,
+      "stockout_region_hours_pct": 7.750950570342205,
+      "pileup_region_hours_pct": 32.76520912547529,
+      "bikes_moved_per_hour": 264.8478539652433,
+      "bike_km_per_hour": 183.11869973949507,
+      "bike_km_total": 96320.4360629744
+    },
+    "HA forecast": {
+      "unmet_rate_pct": 4.846523854306224,
+      "service_level_pct": 95.15347614569377,
+      "stockout_region_hours_pct": 9.032319391634982,
+      "pileup_region_hours_pct": 29.95152091254753,
+      "bikes_moved_per_hour": 470.5911714637607,
+      "bike_km_per_hour": 385.40014092524405,
+      "bike_km_total": 202720.47412667837
+    },
+    "GRU forecast (graph-free)": {
+      "unmet_rate_pct": 4.854222957625246,
+      "service_level_pct": 95.14577704237476,
+      "stockout_region_hours_pct": 9.833650190114069,
+      "pileup_region_hours_pct": 29.86787072243346,
+      "bikes_moved_per_hour": 417.9281957345622,
+      "bike_km_per_hour": 305.03788751753825,
+      "bike_km_total": 160449.9288342251
+    },
+    "MR-STGN mu (point)": {
+      "unmet_rate_pct": 4.826688774162992,
+      "service_level_pct": 95.17331122583701,
+      "stockout_region_hours_pct": 10.07509505703422,
+      "pileup_region_hours_pct": 29.83365019011407,
+      "bikes_moved_per_hour": 394.17774193220436,
+      "bike_km_per_hour": 282.89391259512024,
+      "bike_km_total": 148802.19802503326
+    },
+    "MR-STGN mu+1.0sigma (risk-aware)": {
+      "unmet_rate_pct": 4.525362266783367,
+      "service_level_pct": 95.47463773321662,
+      "stockout_region_hours_pct": 7.272813688212927,
+      "pileup_region_hours_pct": 28.466730038022813,
+      "bikes_moved_per_hour": 553.6430746053915,
+      "bike_km_per_hour": 467.7198980988649,
+      "bike_km_total": 246020.66640000296
+    },
+    "oracle (perfect foresight)": {
+      "unmet_rate_pct": 4.587622823524189,
+      "service_level_pct": 95.41237717647581,
+      "stockout_region_hours_pct": 6.248098859315589,
+      "pileup_region_hours_pct": 28.526615969581748,
+      "bikes_moved_per_hour": 548.5158163851377,
+      "bike_km_per_hour": 458.2078674519341,
+      "bike_km_total": 241017.33827971734
+    }
+  },
+  "Q=3.0h": {
+    "static (no prediction)": {
+      "unmet_rate_pct": 5.192389010416862,
+      "service_level_pct": 94.80761098958314,
+      "stockout_region_hours_pct": 7.576045627376427,
+      "pileup_region_hours_pct": 33.0893536121673,
+      "bikes_moved_per_hour": 259.9231475185541,
+      "bike_km_per_hour": 179.6632401278938,
+      "bike_km_total": 94502.86430727215
+    },
+    "HA forecast": {
+      "unmet_rate_pct": 4.527147089565016,
+      "service_level_pct": 95.47285291043498,
+      "stockout_region_hours_pct": 8.868821292775666,
+      "pileup_region_hours_pct": 29.239543726235738,
+      "bikes_moved_per_hour": 547.5822685605904,
+      "bike_km_per_hour": 475.93849709667836,
+      "bike_km_total": 250343.64947285282
+    },
+    "GRU forecast (graph-free)": {
+      "unmet_rate_pct": 4.517358662233656,
+      "service_level_pct": 95.48264133776634,
+      "stockout_region_hours_pct": 9.773764258555133,
+      "pileup_region_hours_pct": 29.129277566539923,
+      "bikes_moved_per_hour": 506.33547485673853,
+      "bike_km_per_hour": 391.9001966843595,
+      "bike_km_total": 206139.5034559731
+    },
+    "MR-STGN mu (point)": {
+      "unmet_rate_pct": 4.5028127648202885,
+      "service_level_pct": 95.49718723517971,
+      "stockout_region_hours_pct": 10.038022813688213,
+      "pileup_region_hours_pct": 28.99524714828897,
+      "bikes_moved_per_hour": 475.429205738546,
+      "bike_km_per_hour": 357.1587012825376,
+      "bike_km_total": 187865.47687461477
+    },
+    "MR-STGN mu+1.0sigma (risk-aware)": {
+      "unmet_rate_pct": 4.022146962832066,
+      "service_level_pct": 95.97785303716793,
+      "stockout_region_hours_pct": 6.523764258555133,
+      "pileup_region_hours_pct": 26.53422053231939,
+      "bikes_moved_per_hour": 706.6270335348338,
+      "bike_km_per_hour": 719.3387169538325,
+      "bike_km_total": 378372.1651177159
+    },
+    "oracle (perfect foresight)": {
+      "unmet_rate_pct": 4.062857306154437,
+      "service_level_pct": 95.93714269384557,
+      "stockout_region_hours_pct": 5.06083650190114,
+      "pileup_region_hours_pct": 26.117870722433462,
+      "bikes_moved_per_hour": 719.3930381841766,
+      "bike_km_per_hour": 767.0398805209551,
+      "bike_km_total": 403462.9771540224
+    }
+  },
+  "Q=5.0h": {
+    "static (no prediction)": {
+      "unmet_rate_pct": 4.863920058957063,
+      "service_level_pct": 95.13607994104294,
+      "stockout_region_hours_pct": 7.243346007604563,
+      "pileup_region_hours_pct": 34.61406844106464,
+      "bikes_moved_per_hour": 248.8278767971957,
+      "bike_km_per_hour": 171.79372331204075,
+      "bike_km_total": 90363.49846213343
+    },
+    "HA forecast": {
+      "unmet_rate_pct": 4.046087646657983,
+      "service_level_pct": 95.95391235334202,
+      "stockout_region_hours_pct": 8.507604562737644,
+      "pileup_region_hours_pct": 29.386882129277563,
+      "bikes_moved_per_hour": 614.7236029725738,
+      "bike_km_per_hour": 632.1414898241557,
+      "bike_km_total": 332506.4236475059
+    },
+    "GRU forecast (graph-free)": {
+      "unmet_rate_pct": 3.952682013896611,
+      "service_level_pct": 96.04731798610338,
+      "stockout_region_hours_pct": 9.399239543726235,
+      "pileup_region_hours_pct": 29.003802281368824,
+      "bikes_moved_per_hour": 598.1597893477403,
+      "bike_km_per_hour": 517.3849060608516,
+      "bike_km_total": 272144.46058800793
+    },
+    "MR-STGN mu (point)": {
+      "unmet_rate_pct": 3.9596097664581507,
+      "service_level_pct": 96.04039023354186,
+      "stockout_region_hours_pct": 9.840304182509506,
+      "pileup_region_hours_pct": 28.848859315589355,
+      "bikes_moved_per_hour": 562.2700146351117,
+      "bike_km_per_hour": 460.3070394994261,
+      "bike_km_total": 242121.50277669812
+    },
+    "MR-STGN mu+1.0sigma (risk-aware)": {
+      "unmet_rate_pct": 3.2116642254472243,
+      "service_level_pct": 96.78833577455278,
+      "stockout_region_hours_pct": 5.554182509505703,
+      "pileup_region_hours_pct": 24.36977186311787,
+      "bikes_moved_per_hour": 866.5788174444416,
+      "bike_km_per_hour": 1168.1333488413964,
+      "bike_km_total": 614438.1414905745
+    },
+    "oracle (perfect foresight)": {
+      "unmet_rate_pct": 3.0658841785701996,
+      "service_level_pct": 96.9341158214298,
+      "stockout_region_hours_pct": 3.210076045627376,
+      "pileup_region_hours_pct": 23.252851711026615,
+      "bikes_moved_per_hour": 909.1624891391755,
+      "bike_km_per_hour": 1355.9693974583906,
+      "bike_km_total": 713239.9030631135
+    }
+  }
+}
