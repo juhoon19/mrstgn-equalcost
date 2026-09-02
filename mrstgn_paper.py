@@ -407,7 +407,8 @@ def main():
                     help='training-period OD count matrix (N,N) as .npy; overrides the dataset key')
     ap.add_argument('--k_geo', type=int, default=8)
     ap.add_argument('--k_flow', type=int, default=15)
-    ap.add_argument('--delta_s', type=float, default=0.7)
+    ap.add_argument('--delta_s', type=float, default=0.95,
+                    help='similarity threshold. Chosen per city to reach a comparable graph density (19.6 per cent): 0.95 for Shenzhen, 0.967 for Shanghai, 0.981 for Chicago. A fixed threshold does not transfer between cities; see Section 3.2.1 of the paper.')
     ap.add_argument('--seq_len', type=int, default=24)
     ap.add_argument('--hidden_dim', type=int, default=64)
     ap.add_argument('--batch_size', type=int, default=32)

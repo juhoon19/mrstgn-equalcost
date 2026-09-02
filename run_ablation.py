@@ -51,7 +51,7 @@ def main():
     ap.add_argument('--mat', default='dataset.mat')
     ap.add_argument('--out', default=os.path.join(HERE, 'ablation_out'))
     ap.add_argument('--od_npy', default=None)
-    ap.add_argument('--delta_s', type=float, default=0.7,
+    ap.add_argument('--delta_s', type=float, default=0.95,
                     help='similarity-graph threshold; 0.7 yields ~94%% density, see the sweep')
     ap.add_argument('--k_geo', type=int, default=8)
     ap.add_argument('--K_f', type=int, default=15)

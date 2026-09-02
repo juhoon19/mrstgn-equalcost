@@ -153,7 +153,8 @@ Significance testing in the paper uses three seeds for the headline
 comparisons:
 
 ```bash
-python run_ablation.py --variants headline --seeds 7 2026 --out ./ablation_out
+python run_ablation.py --delta_s 0.95 --variants headline --seeds 7 2026 \
+       --out ./ablation_out
 for M in GRU LSTM; do
   python baselines.py --models $M --seeds 7   --out ./baseline_out
   python baselines.py --models $M --seeds 2026 --out ./baseline_out
