@@ -1,0 +1,322 @@
+:root {
+  --bg: #070b10;
+  --panel: rgba(12, 18, 26, 0.78);
+  --line: rgba(160, 200, 230, 0.16);
+  --text: #d8e4ee;
+  --muted: #8397a8;
+  --accent: #35d49a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+
+#view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+.panel {
+  position: fixed;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.sub {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+#hud {
+  top: 10px;
+  left: 10px;
+  padding: 8px 12px;
+  min-width: 150px;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.row span {
+  color: var(--muted);
+}
+
+.row.small {
+  font-size: 11px;
+}
+
+#board {
+  top: 10px;
+  right: 10px;
+  padding: 8px 12px;
+  width: 190px;
+  max-height: 40vh;
+  overflow: hidden;
+}
+
+#board ol {
+  margin: 0;
+  padding-left: 18px;
+}
+
+#board li {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#board li .n {
+  float: right;
+  color: var(--muted);
+}
+
+#board li.me {
+  color: var(--accent);
+}
+
+#tools {
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 5px;
+}
+
+#tools button {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 8px 3px;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  position: relative;
+  overflow: hidden;
+  min-width: 48px;
+}
+
+#tools button span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+#tools button.active {
+  border-color: var(--accent);
+  background: rgba(53, 212, 154, 0.12);
+}
+
+#tools button .cool {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+}
+
+#chatlog {
+  position: fixed;
+  left: 10px;
+  bottom: 70px;
+  width: min(360px, 60vw);
+  max-height: 30vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 2px;
+  pointer-events: none;
+  font-size: 12px;
+}
+
+#chatlog div {
+  background: rgba(8, 12, 18, 0.6);
+  padding: 2px 8px;
+  border-radius: 6px;
+  width: fit-content;
+  max-width: 100%;
+  word-break: break-word;
+  animation: fade 14s forwards;
+}
+
+@keyframes fade {
+  0%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+#chatform {
+  position: fixed;
+  left: 10px;
+  bottom: 70px;
+  width: min(360px, 80vw);
+}
+
+#chatform input {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(8, 12, 18, 0.92);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.hidden {
+  display: none !important;
+}
+
+#minimap {
+  position: fixed;
+  right: 10px;
+  bottom: 12px;
+  width: 150px;
+  height: 150px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(8, 12, 18, 0.8);
+  cursor: pointer;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 7, 10, 0.72);
+  padding: 16px;
+}
+
+.card {
+  width: min(420px, 100%);
+  background: #0e151d;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 22px;
+}
+
+.card h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+}
+
+.lead {
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+
+.card label {
+  display: block;
+  margin: 10px 0;
+  color: var(--muted);
+}
+
+.card input[type='text'],
+.card input:not([type]) {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  background: #0a1016;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+}
+
+.card input[type='range'] {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+}
+
+#join-swatch {
+  height: 8px;
+  border-radius: 4px;
+  margin-bottom: 14px;
+}
+
+#join-go {
+  width: 100%;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #042;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  margin: 12px 0 0;
+}
+
+@media (max-width: 640px) {
+  #board {
+    display: none;
+  }
+  #hud {
+    font-size: 11px;
+    min-width: 0;
+  }
+  #hud .small {
+    display: none;
+  }
+  #hud #h-status-row {
+    display: flex;
+  }
+  #minimap {
+    width: 96px;
+    height: 96px;
+    bottom: 76px;
+  }
+  #tools button {
+    min-width: 42px;
+    padding: 5px 5px 3px;
+  }
+}

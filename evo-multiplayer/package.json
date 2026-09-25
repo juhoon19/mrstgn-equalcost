@@ -1,0 +1,22 @@
+{
+  "name": "evo-multiplayer",
+  "version": "0.1.0",
+  "description": "Public-internet multiplayer backbone for a 2D physics / biochemistry / evolution sandbox: sharded authoritative simulation, fan-out gateways, interest management, binary delta snapshots.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/launch.js",
+    "dev": "node src/launch.js --shards 2 --gateways 1",
+    "shard": "node src/server/shard-node.js",
+    "gateway": "node src/server/gateway-node.js",
+    "bots": "node bench/bots.js",
+    "test": "node --test test/"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

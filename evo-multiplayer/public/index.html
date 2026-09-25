@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="theme-color" content="#070b10" />
+    <title>原始汤 · 多人演化沙盒</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='%2335d49a'/%3E%3Ccircle cx='19' cy='13' r='3' fill='%23062'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+
+    <div id="hud" class="panel">
+      <div class="title">原始汤 <span class="sub">Primordial Soup</span></div>
+      <div class="row"><span>在线</span><b id="h-online">–</b></div>
+      <div class="row"><span>生物</span><b id="h-cells">–</b></div>
+      <div class="row"><span>我的后代</span><b id="h-mine">0</b></div>
+      <div class="row small"><span>延迟</span><b id="h-ping">–</b></div>
+      <div class="row small"><span>下行</span><b id="h-kbps">–</b></div>
+      <div class="row small"><span>时间流速</span><b id="h-tidi">–</b></div>
+      <div class="row small" id="h-status-row"><span>状态</span><b id="h-status">连接中…</b></div>
+    </div>
+
+    <div id="board" class="panel">
+      <div class="title">谱系排行</div>
+      <ol id="board-list"></ol>
+    </div>
+
+    <div id="tools" class="panel">
+      <button data-tool="pan" title="拖动查看 (1)">✋<span>移动</span></button>
+      <button data-tool="nutrient" title="投放营养 (2)">🟢<span>营养</span></button>
+      <button data-tool="seed" title="播种你的谱系 (3)">🧬<span>播种</span></button>
+      <button data-tool="stir" title="拖动搅动水流 (4)">🌀<span>搅动</span></button>
+      <button data-tool="signal" title="释放信号素 (5)">📡<span>信号</span></button>
+      <button id="btn-chat" title="聊天 (Enter)">💬<span>聊天</span></button>
+    </div>
+
+    <div id="chatlog"></div>
+    <form id="chatform" class="hidden" autocomplete="off">
+      <input id="chatinput" maxlength="200" placeholder="附近的人能看到你的消息…" />
+    </form>
+
+    <canvas id="minimap" width="180" height="180"></canvas>
+
+    <div id="join" class="overlay">
+      <div class="card">
+        <h1>原始汤</h1>
+        <p class="lead">一个任何人都能加入的二维生命演化世界。投放营养、播种你的谱系、搅动水流——看它们和所有人的生物一起竞争、变异、演化。</p>
+        <label>名字 <input id="join-name" maxlength="24" placeholder="给你的谱系起个名" /></label>
+        <label>颜色 <input id="join-hue" type="range" min="0" max="359" /></label>
+        <div id="join-swatch"></div>
+        <button id="join-go">进入世界</button>
+        <p class="hint">滚轮 / 双指缩放 · 拖动平移 · 1–5 切换工具 · Enter 聊天</p>
+      </div>
+    </div>
+
+    <script type="module" src="client.js"></script>
+  </body>
+</html>
