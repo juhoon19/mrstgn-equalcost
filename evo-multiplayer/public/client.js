@@ -154,11 +154,11 @@ function onBinary(bytes) {
     case S_CHUNK:
       world.applyChunk(bytes, now);
       break;
-    case S_FIELD: {
-      const id = world.applyField(bytes, now);
-      fieldImages.delete(id);
+    case S_FIELD:
+      world.applyField(bytes, now);
+      // Neighbours' border rings depend on this chunk too: rebuild lazily.
+      fieldImages.clear();
       break;
-    }
     case S_EVENTS:
       onEvents(decodeEvents(bytes, welcome.world, welcome.posQuant));
       break;
@@ -475,27 +475,59 @@ function addChatLine(name, text) {
 }
 
 // --------------------------------------------------------------- rendering
+// Each chunk's field becomes a (res+2)^2 texture whose outer ring is copied
+// from the neighbouring chunks, drawn with a half-cell inset so bilinear
+// smoothing blends across chunk borders instead of showing seams.
+function fieldColor(f, i, out, o) {
+  const C = welcome.world.channels;
+  const n = f.data[i * C] / 255; // nutrient
+  const w = C > 1 ? f.data[i * C + 1] / 255 : 0; // waste
+  const s = C > 2 ? f.data[i * C + 2] / 255 : 0; // signal
+  out[o] = Math.min(255, 20 + w * 170 + s * 40);
+  out[o + 1] = Math.min(255, 26 + n * 150 + s * 60);
+  out[o + 2] = Math.min(255, 36 + n * 40 + s * 230);
+  out[o + 3] = 255;
+}
+
 function fieldImage(chunkId, f) {
   let img = fieldImages.get(chunkId);
   if (img) return img;
   const res = f.res;
-  const C = welcome.world.channels;
+  const P = res + 2;
+  const X = welcome.world.chunksX;
+  const cx = chunkId % X;
+  const cy = (chunkId - cx) / X;
+  const nb = (dx, dy) => {
+    const nx = cx + dx;
+    const ny = cy + dy;
+    if (nx < 0 || ny < 0 || nx >= X || ny >= welcome.world.chunksY) return null;
+    const g = world.fields.get(ny * X + nx);
+    return g && g.res === res ? g : null;
+  };
   const c = document.createElement('canvas');
-  c.width = res;
-  c.height = res;
+  c.width = P;
+  c.height = P;
   const g = c.getContext('2d');
-  const data = g.createImageData(res, res);
-  for (let i = 0; i < res * res; i++) {
-    const n = f.data[i * C] / 255; // nutrient
-    const w = C > 1 ? f.data[i * C + 1] / 255 : 0; // waste
-    const s = C > 2 ? f.data[i * C + 2] / 255 : 0; // signal
-    data.data[i * 4] = Math.min(255, 20 + w * 170 + s * 40);
-    data.data[i * 4 + 1] = Math.min(255, 26 + n * 150 + s * 60);
-    data.data[i * 4 + 2] = Math.min(255, 36 + n * 40 + s * 230);
-    data.data[i * 4 + 3] = 255;
+  const data = g.createImageData(P, P);
+  for (let y = -1; y <= res; y++) {
+    for (let x = -1; x <= res; x++) {
+      // Which chunk supplies this padded cell, and which of its cells.
+      const dx = x < 0 ? -1 : x >= res ? 1 : 0;
+      const dy = y < 0 ? -1 : y >= res ? 1 : 0;
+      let src = dx || dy ? nb(dx, dy) : f;
+      let sx = x - dx * res;
+      let sy = y - dy * res;
+      if (!src) {
+        // No neighbour data (world edge / not loaded): clamp to own edge.
+        src = f;
+        sx = Math.min(res - 1, Math.max(0, x));
+        sy = Math.min(res - 1, Math.max(0, y));
+      }
+      fieldColor(src, sy * res + sx, data.data, ((y + 1) * P + x + 1) * 4);
+    }
   }
   g.putImageData(data, 0, 0);
-  img = { canvas: c };
+  img = { canvas: c, res };
   fieldImages.set(chunkId, img);
   return img;
 }
@@ -553,18 +585,21 @@ function render(now) {
   if (!detailed) drawSummary();
   else {
     ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     for (const id of detailed) {
       const f = world.fields.get(id);
       const cx = id % welcome.world.chunksX;
       const cy = (id - cx) / welcome.world.chunksX;
       if (!f) continue;
-      ctx.drawImage(fieldImage(id, f).canvas, cx * S, cy * S, S, S);
+      const img = fieldImage(id, f);
+      // Source rect insets by half a cell so the border ring only feeds the blend.
+      ctx.drawImage(img.canvas, 0.5, 0.5, img.res + 1, img.res + 1, cx * S - S / (2 * img.res), cy * S - S / (2 * img.res), S + S / img.res, S + S / img.res);
     }
   }
 
   // Chunk grid.
   ctx.lineWidth = 1 / cam.zoom;
-  ctx.strokeStyle = 'rgba(160,200,230,0.06)';
+  ctx.strokeStyle = 'rgba(160,200,230,0.035)';
   ctx.beginPath();
   for (let gx = Math.max(0, Math.floor(x0 / S)); gx <= Math.min(welcome.world.chunksX, Math.ceil(x1 / S)); gx++) {
     ctx.moveTo(gx * S, Math.max(0, y0));
