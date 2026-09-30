@@ -6,6 +6,8 @@
 // and neighbouring shards (ghosts + migrations, over outgoing Links).
 
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { Topology } from '../shared/topology.js';
 import { Reader } from '../shared/codec.js';
@@ -38,7 +40,44 @@ export async function startShard(opts = {}) {
   const topo = new Topology(topoCfg.world || {}, topoCfg.shards.length);
   const chunkSize = topo.world.chunkSize;
   const region = new Region({ topo, shardId, game, seed: opts.seed ?? cfg.seed });
-  game.init(region);
+  // Persistence: restore the last snapshot if there is a compatible one,
+  // otherwise start a fresh world.
+  const dataDir = opts.dataDir ?? cfg.get('data-dir', 'DATA_DIR', '');
+  const snapshotEvery = Number(opts.snapshotEvery ?? cfg.get('snapshot-every', 'SNAPSHOT_EVERY', 30)) * 1000;
+  const snapFile = dataDir ? path.join(dataDir, `shard-${shardId}-of-${topoCfg.shards.length}.bin`) : '';
+  let restored = false;
+  if (snapFile && fs.existsSync(snapFile)) {
+    try {
+      restored = region.restore(fs.readFileSync(snapFile));
+      log(restored ? `restored ${snapFile} (tick ${region.tick})` : `ignored incompatible ${snapFile}`);
+    } catch (err) {
+      log(`could not read ${snapFile}: ${err.message}`);
+    }
+  }
+  if (!restored) game.init(region);
+  let saving = false;
+  async function saveSnapshot() {
+    if (!snapFile || saving) return;
+    saving = true;
+    try {
+      const bytes = region.serialize();
+      await fs.promises.mkdir(dataDir, { recursive: true });
+      const tmp = `${snapFile}.tmp`;
+      await fs.promises.writeFile(tmp, bytes);
+      await fs.promises.rename(tmp, snapFile); // atomic replace
+    } catch (err) {
+      log(`snapshot failed: ${err.message}`);
+    } finally {
+      saving = false;
+    }
+  }
+  function saveSnapshotSync() {
+    if (!snapFile) return;
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(`${snapFile}.tmp`, region.serialize());
+    fs.renameSync(`${snapFile}.tmp`, snapFile);
+  }
+  const snapTimer = snapFile ? setInterval(saveSnapshot, snapshotEvery) : null;
   log(`owns ${region.chunks.size} chunks, neighbours [${region.neighbours}], ${region.entityCount()} entities`);
 
   // ------------------------------------------------------------ gateways
@@ -413,8 +452,10 @@ export async function startShard(opts = {}) {
     resume() {
       paused = false;
     },
+    save: saveSnapshotSync,
     close() {
       stopped = true;
+      if (snapTimer) clearInterval(snapTimer);
       for (const l of peerLinks.values()) l.close();
       for (const ws of wss.clients) ws.terminate();
       wss.close();
@@ -425,8 +466,22 @@ export async function startShard(opts = {}) {
 
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
-  startShard().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+  startShard()
+    .then((shard) => {
+      // Graceful stop (docker stop, launch.js shutdown): save, then exit.
+      const stop = () => {
+        try {
+          shard.save();
+        } catch (err) {
+          console.error('final snapshot failed', err);
+        }
+        process.exit(0);
+      };
+      process.on('SIGTERM', stop);
+      process.on('SIGINT', stop);
+    })
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
 }

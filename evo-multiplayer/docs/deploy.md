@@ -98,11 +98,14 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `ALLOWED_ORIGINS` | 允许的网页来源（逗号分隔，空 = 不限） | 空 |
 | `TICK_HZ` / `NET_EVERY` / `KEY_EVERY` | 模拟频率 / 每几 tick 发一帧 / 每几帧一个关键帧 | 20 / 2 / 30 |
 | `FIELD_EVERY` / `FIELD_NET_RES` | 化学场发送间隔(tick) / 发送分辨率 | 20 / 8 |
+| `DATA_DIR` | 分片快照目录（空 = 不持久化） | `launch.js`：`./data`；Docker：`/data` |
+| `SNAPSHOT_EVERY` | 快照间隔（秒） | 30 |
 | `SHARDS` / `GATEWAYS` / `WORLD` | `launch.js` 单机启动用 | 自动 / 自动 / 24x24 |
 
 ## 上线安全清单
 
-- [ ] 设置随机的 `CLUSTER_SECRET`、`TOKEN_SECRET`，并固定 `TOKEN_SECRET`。
+- [ ] 设置随机的 `CLUSTER_SECRET`、`TOKEN_SECRET`，并固定 `TOKEN_SECRET`（`launch.js` 未指定时会自动生成并存在 `data/secrets.json`）。
+- [ ] 备份 `DATA_DIR`（Docker 里是每个分片的 `shardN_data` 卷）：那就是整个世界。
 - [ ] 分片端口只在内网；防火墙只开 80/443。
 - [ ] 走 HTTPS/WSS（Caddy/Cloudflare 自动处理）。
 - [ ] 在反代后面开 `TRUST_PROXY=true`，否则单 IP 限制失效或误伤。

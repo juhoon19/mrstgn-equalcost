@@ -24,19 +24,27 @@ services:
   shard0:
     <<: *common
     command: ['node', 'src/server/shard-node.js']
-    environment: { <<: *env, SHARD_ID: '0', HOST: '0.0.0.0', PORT: '9100' }
+    environment: { <<: *env, SHARD_ID: '0', HOST: '0.0.0.0', PORT: '9100', DATA_DIR: /data }
+    volumes: ['shard0_data:/data']
+    stop_grace_period: 20s # shards write a final snapshot on SIGTERM
   shard1:
     <<: *common
     command: ['node', 'src/server/shard-node.js']
-    environment: { <<: *env, SHARD_ID: '1', HOST: '0.0.0.0', PORT: '9100' }
+    environment: { <<: *env, SHARD_ID: '1', HOST: '0.0.0.0', PORT: '9100', DATA_DIR: /data }
+    volumes: ['shard1_data:/data']
+    stop_grace_period: 20s # shards write a final snapshot on SIGTERM
   shard2:
     <<: *common
     command: ['node', 'src/server/shard-node.js']
-    environment: { <<: *env, SHARD_ID: '2', HOST: '0.0.0.0', PORT: '9100' }
+    environment: { <<: *env, SHARD_ID: '2', HOST: '0.0.0.0', PORT: '9100', DATA_DIR: /data }
+    volumes: ['shard2_data:/data']
+    stop_grace_period: 20s # shards write a final snapshot on SIGTERM
   shard3:
     <<: *common
     command: ['node', 'src/server/shard-node.js']
-    environment: { <<: *env, SHARD_ID: '3', HOST: '0.0.0.0', PORT: '9100' }
+    environment: { <<: *env, SHARD_ID: '3', HOST: '0.0.0.0', PORT: '9100', DATA_DIR: /data }
+    volumes: ['shard3_data:/data']
+    stop_grace_period: 20s # shards write a final snapshot on SIGTERM
 
   gateway:
     <<: *common
@@ -61,3 +69,7 @@ networks:
 
 volumes:
   caddy_data: {}
+  shard0_data: {}
+  shard1_data: {}
+  shard2_data: {}
+  shard3_data: {}

@@ -552,14 +552,32 @@ export class Region {
 
   // ---------------------------------------------------------- serialisation
 
+  writeEntity(w, e) {
+    w.varint(e.id).u8(e.kind).f32(e.x).f32(e.y).f32(e.vx).f32(e.vy).f32(e.r);
+    w.u24(e.rgb).varint(e.owner).f32(e.energy).f32(e.age);
+    this.game.encodeData(e, w);
+  }
+
+  readEntity(r) {
+    const e = new Entity(r.varint());
+    e.kind = r.u8();
+    e.x = r.f32();
+    e.y = r.f32();
+    e.vx = r.f32();
+    e.vy = r.f32();
+    e.r = r.f32();
+    e.rgb = r.u24();
+    e.owner = r.varint();
+    e.energy = r.f32();
+    e.age = r.f32();
+    this.game.decodeData(e, r);
+    return e;
+  }
+
   encodeMigration(entities) {
     const w = new Writer(256 + entities.length * 128);
     w.u8(I_MIGRATE).varint(this.shardId).varint(entities.length);
-    for (const e of entities) {
-      w.varint(e.id).u8(e.kind).f32(e.x).f32(e.y).f32(e.vx).f32(e.vy).f32(e.r);
-      w.u24(e.rgb).varint(e.owner).f32(e.energy).f32(e.age);
-      this.game.encodeData(e, w);
-    }
+    for (const e of entities) this.writeEntity(w, e);
     return w.finish();
   }
 
@@ -569,22 +587,65 @@ export class Region {
     const from = r.varint();
     const n = r.varint();
     const list = [];
-    for (let i = 0; i < n; i++) {
-      const e = new Entity(r.varint());
-      e.kind = r.u8();
-      e.x = r.f32();
-      e.y = r.f32();
-      e.vx = r.f32();
-      e.vy = r.f32();
-      e.r = r.f32();
-      e.rgb = r.u24();
-      e.owner = r.varint();
-      e.energy = r.f32();
-      e.age = r.f32();
-      this.game.decodeData(e, r);
-      list.push(e);
-    }
+    for (let i = 0; i < n; i++) list.push(this.readEntity(r));
     return { from, entities: list };
+  }
+
+  // ------------------------------------------------------------ persistence
+
+  // Whole-shard snapshot: clock, id counter, every owned chunk's chemical
+  // field and entities (with game data). Restored only into a shard with the
+  // same id, shard count and world geometry.
+  serialize() {
+    const w = new Writer(1 << 20);
+    const { chunksX, chunksY, chunkSize, fieldRes, channels } = this.world;
+    w.str('evo-shard-v1').varint(this.shardId).varint(this.topo.shardCount);
+    w.varint(chunksX).varint(chunksY).varint(chunkSize).varint(fieldRes).varint(channels);
+    w.varint(this.tick).f32(this.time).varint(this.nextSerial);
+    w.varint(this.chunks.size);
+    for (const chunk of this.chunks.values()) {
+      w.varint(chunk.id);
+      for (let i = 0; i < chunk.field.length; i++) w.f32(chunk.field[i]);
+      w.varint(chunk.entities.length);
+      for (const e of chunk.entities) this.writeEntity(w, e);
+    }
+    return w.finish();
+  }
+
+  // Returns false (and changes nothing) if the snapshot does not fit.
+  restore(bytes) {
+    const r = new Reader(bytes);
+    if (r.str() !== 'evo-shard-v1') return false;
+    const { chunksX, chunksY, chunkSize, fieldRes, channels } = this.world;
+    const header = [r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.varint()];
+    const want = [this.shardId, this.topo.shardCount, chunksX, chunksY, chunkSize, fieldRes, channels];
+    if (header.some((v, i) => v !== want[i])) return false;
+    const tick = r.varint();
+    const time = r.f32();
+    const nextSerial = r.varint();
+    const n = r.varint();
+    const loaded = [];
+    for (let k = 0; k < n; k++) {
+      const id = r.varint();
+      const field = new Float32Array(this.G * this.G * this.C);
+      for (let i = 0; i < field.length; i++) field[i] = r.f32();
+      const m = r.varint();
+      const ents = [];
+      for (let i = 0; i < m; i++) ents.push(this.readEntity(r));
+      loaded.push({ id, field, ents });
+    }
+    for (const c of this.chunks.values()) c.entities = [];
+    for (const { id, field, ents } of loaded) {
+      const chunk = this.chunks.get(id);
+      if (!chunk) continue;
+      chunk.field.set(field);
+      for (const e of ents) e.chunk = id;
+      chunk.entities = ents;
+    }
+    this.tick = tick;
+    this.time = time;
+    this.nextSerial = nextSerial;
+    return true;
   }
 
   // Per neighbour: entities near the shared seam plus the edge rows of the

@@ -197,3 +197,30 @@ test('sharded simulation: ids stay unique, entities live in the chunk that conta
   }
   assert.ok(cells > 100, `population collapsed: ${cells}`);
 });
+
+test('shard snapshot restores entities, fields, ids and clock exactly', () => {
+  const topo = new Topology({ chunksX: 4, chunksY: 4 }, 2);
+  const a = new Region({ topo, shardId: 1, game: soup, seed: 9 });
+  soup.init(a);
+  for (let t = 0; t < 60; t++) a.step(1 / 20);
+  const bytes = a.serialize();
+  const b = new Region({ topo, shardId: 1, game: soup, seed: 1 });
+  assert.ok(b.restore(bytes));
+  assert.equal(b.tick, a.tick);
+  assert.equal(b.nextSerial, a.nextSerial);
+  for (const [id, ca] of a.chunks) {
+    const cb = b.chunks.get(id);
+    assert.deepEqual([...cb.field], [...ca.field]);
+    assert.equal(cb.entities.length, ca.entities.length);
+    ca.entities.forEach((e, i) => {
+      const f = cb.entities[i];
+      assert.equal(f.id, e.id);
+      assert.equal(f.owner, e.owner);
+      assert.equal(Math.fround(e.x), f.x);
+      if (e.data) assert.deepEqual([...f.data.genome], [...e.data.genome]);
+    });
+  }
+  // Wrong shard / geometry is refused without touching the region.
+  const other = new Region({ topo, shardId: 0, game: soup, seed: 1 });
+  assert.equal(other.restore(bytes), false);
+});

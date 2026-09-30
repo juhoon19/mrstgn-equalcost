@@ -9,6 +9,10 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
 COPY public ./public
+# Shard snapshots (mount a volume here) - see DATA_DIR.
+RUN mkdir -p /data && chown node:node /data
+ENV DATA_DIR=/data
+VOLUME ["/data"]
 USER node
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s CMD wget -qO- http://127.0.0.1:${PORT:-8080}/healthz || exit 1
