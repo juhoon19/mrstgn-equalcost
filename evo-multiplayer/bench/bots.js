@@ -42,6 +42,8 @@ const viewW = Number(arg('view-w', 900));
 const viewH = Number(arg('view-h', 520));
 const quietBots = arg('quiet', 'false') === 'true';
 const loFrac = Number(arg('lo', 0)); // share of bots on the 2.5 Hz tier
+// --area x0,y0,x1,y1 keeps every viewport inside a region (hotspot tests).
+const area = arg('area', '') ? arg('area', '').split(',').map(Number) : null;
 
 const totals = {
   connected: 0,
@@ -130,8 +132,13 @@ class Bot {
     }
     const W = this.topo.width;
     const H = this.topo.height;
-    this.x = Math.random() * (W - viewW);
-    this.y = Math.random() * (H - viewH);
+    const [ax0, ay0, ax1, ay1] = area || [0, 0, W, H];
+    this.bx0 = ax0;
+    this.by0 = ay0;
+    this.bx1 = Math.max(ax0, ax1 - viewW);
+    this.by1 = Math.max(ay0, ay1 - viewH);
+    this.x = ax0 + Math.random() * (this.bx1 - ax0);
+    this.y = ay0 + Math.random() * (this.by1 - ay0);
     this.vx = (Math.random() - 0.5) * 60;
     this.vy = (Math.random() - 0.5) * 60;
     this.sendView();
@@ -140,8 +147,8 @@ class Bot {
       // Drift the camera; bounce at the edges.
       this.x += this.vx * 0.25;
       this.y += this.vy * 0.25;
-      if (this.x < 0 || this.x > W - viewW) this.vx = -this.vx;
-      if (this.y < 0 || this.y > H - viewH) this.vy = -this.vy;
+      if (this.x < this.bx0 || this.x > this.bx1) this.vx = -this.vx;
+      if (this.y < this.by0 || this.y > this.by1) this.vy = -this.vy;
       this.sendView();
     });
     every(200, () => {

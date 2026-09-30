@@ -11,12 +11,13 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { Topology } from '../shared/topology.js';
 import { Reader } from '../shared/codec.js';
-import { I_ACTIONS, I_CURSORS, I_MIGRATE, I_GHOST, I_SUMMARY, EV_ACTION, EV_CHAT, packBatch } from '../shared/protocol.js';
+import { I_ACTIONS, I_CURSORS, I_MIGRATE, I_GHOST, I_XFER, I_SUMMARY, EV_ACTION, EV_CHAT, packBatch } from '../shared/protocol.js';
 import { Writer } from '../shared/codec.js';
 import { Region } from './region.js';
 import { Link, readClusterConfig } from './link.js';
 import { encodeChunkFrame, encodeField, encodeEvents } from './snapshot.js';
 import { loadGame } from './game-loader.js';
+import { Coordinator } from './coordinator.js';
 
 export async function startShard(opts = {}) {
   const cfg = readClusterConfig();
@@ -42,24 +43,28 @@ export async function startShard(opts = {}) {
   const topo = new Topology(topoCfg.world || {}, topoCfg.shards.length);
   const chunkSize = topo.world.chunkSize;
   const region = new Region({ topo, shardId, game, seed: opts.seed ?? cfg.seed });
-  // Persistence: restore the last snapshot if there is a compatible one,
-  // otherwise start a fresh world.
+  // Persistence: the snapshot is parsed now but applied only once the
+  // coordinator has told us which chunks we own (see boot below).
   const dataDir = opts.dataDir ?? cfg.get('data-dir', 'DATA_DIR', '');
   const snapshotEvery = Number(opts.snapshotEvery ?? cfg.get('snapshot-every', 'SNAPSHOT_EVERY', 30)) * 1000;
   const snapFile = dataDir ? path.join(dataDir, `shard-${shardId}-of-${topoCfg.shards.length}.bin`) : '';
-  let restored = false;
+  let snap = null;
   if (snapFile && fs.existsSync(snapFile)) {
     try {
-      restored = region.restore(fs.readFileSync(snapFile));
-      log(restored ? `restored ${snapFile} (tick ${region.tick})` : `ignored incompatible ${snapFile}`);
+      snap = region.parseSnapshot(fs.readFileSync(snapFile));
+      log(snap ? `found snapshot ${snapFile} (tick ${snap.tick}, ${snap.chunks.size} chunks)` : `ignored incompatible ${snapFile}`);
     } catch (err) {
       log(`could not read ${snapFile}: ${err.message}`);
     }
   }
-  if (!restored) game.init(region);
+  let booted = false;
+  let paused = false; // test/admin freeze (see pause())
+  const pausedPeerQueue = [];
+  let bootResolve;
+  const bootPromise = new Promise((r) => (bootResolve = r));
   let saving = false;
   async function saveSnapshot() {
-    if (!snapFile || saving) return;
+    if (!snapFile || saving || !booted) return;
     saving = true;
     try {
       const bytes = region.serialize();
@@ -74,13 +79,12 @@ export async function startShard(opts = {}) {
     }
   }
   function saveSnapshotSync() {
-    if (!snapFile) return;
+    if (!snapFile || !booted) return;
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(`${snapFile}.tmp`, region.serialize());
     fs.renameSync(`${snapFile}.tmp`, snapFile);
   }
   const snapTimer = snapFile ? setInterval(saveSnapshot, snapshotEvery) : null;
-  log(`owns ${region.chunks.size} chunks, neighbours [${region.neighbours}], ${region.entityCount()} entities`);
 
   // ------------------------------------------------------------ gateways
   const gateways = new Map(); // ws -> { id, bytesOut }
@@ -146,24 +150,56 @@ export async function startShard(opts = {}) {
       if (!chunk.subscribers.has(ws)) continue;
       for (const st of chunk.streams) unsub(chunk, st.tier, ws);
     }
+    for (const [id, m] of pendingSubs) {
+      m.delete(ws);
+      if (m.size === 0) pendingSubs.delete(id);
+    }
+  }
+
+  // Subscriptions for chunks we are about to own (map already says so, the
+  // chunk handoff is still in flight) or before boot: applied on arrival.
+  const pendingSubs = new Map(); // chunkId -> Map(ws -> Set(tier))
+  function subscribe(ws, id, tier) {
+    const chunk = region.chunks.get(id);
+    if (!chunk) {
+      if (id < 0 || id >= topo.chunkCount) return;
+      let m = pendingSubs.get(id);
+      if (!m) pendingSubs.set(id, (m = new Map()));
+      let tiers = m.get(ws);
+      if (!tiers) m.set(ws, (tiers = new Set()));
+      tiers.add(tier);
+      return;
+    }
+    chunk.streams[tier].subscribers.add(ws);
+    chunk.streams[tier].forceKey = true;
+    chunk.subscribers.add(ws);
+  }
+  function applyPendingSubs(id) {
+    const m = pendingSubs.get(id);
+    if (!m) return;
+    pendingSubs.delete(id);
+    for (const [ws, tiers] of m) {
+      if (ws.readyState !== 1 || !gateways.has(ws)) continue;
+      for (const tier of tiers) subscribe(ws, id, tier);
+    }
   }
 
   function handleGatewayJson(ws, msg) {
     const tier = msg.tier === 1 ? 1 : 0;
     switch (msg.t) {
       case 'sub':
-        for (const id of msg.c || []) {
-          const chunk = region.chunks.get(id);
-          if (!chunk) continue;
-          chunk.streams[tier].subscribers.add(ws);
-          chunk.streams[tier].forceKey = true;
-          chunk.subscribers.add(ws);
-        }
+        for (const id of msg.c || []) subscribe(ws, id, tier);
         break;
       case 'unsub':
         for (const id of msg.c || []) {
           const chunk = region.chunks.get(id);
           if (chunk) unsub(chunk, tier, ws);
+          const m = pendingSubs.get(id);
+          if (m && m.get(ws)) {
+            m.get(ws).delete(tier);
+            if (m.get(ws).size === 0) m.delete(ws);
+            if (m.size === 0) pendingSubs.delete(id);
+          }
         }
         break;
       case 'player':
@@ -248,20 +284,31 @@ export async function startShard(opts = {}) {
       { t: 'hello', role: 'shard', id: shardId, secret },
       {
         log,
+        onOpen: () => {
+          if (n === 0 && shardId !== 0) link.send(JSON.stringify(myClaim()));
+        },
         onMessage: (data, isBinary) => {
           if (isBinary) return;
           try {
             const msg = JSON.parse(data.toString());
             if (msg.t === 'mack') inflight.delete(msg.seq);
-          } catch {
-            /* ignore */
+            else if (msg.t === 'xack') xferOut.delete(msg.seq);
+            else if (n === 0) onCoordinatorMessage(msg);
+          } catch (err) {
+            log('bad peer message', err.message);
           }
         },
-        onClose: () => requeueInflight(n),
+        onClose: () => {
+          requeueInflight(n);
+          for (const x of xferOut.values()) if (x.to === n) x.sent = false;
+        },
       },
     );
     peerLinks.set(n, link);
     return link;
+  }
+  function peer(n) {
+    return peerLinks.get(n) || openPeer(n);
   }
   function requeueInflight(n) {
     for (const [seq, b] of inflight) {
@@ -272,13 +319,157 @@ export async function startShard(opts = {}) {
       else outbox.set(n, [...b.list]);
     }
   }
-  for (const n of region.neighbours) openPeer(n);
   let migratedIn = 0;
   let migratedOut = 0;
+
+  // ---------------------------------------------------- ownership / handoff
+  // Chunk handoffs use the same (epoch, seq) + ack scheme as migrations: the
+  // chunk stays in `xferOut` (re-sent after reconnects) until the receiver
+  // acknowledges it, and the receiver ignores duplicates.
+  let xferSeq = 0;
+  const xferOut = new Map(); // seq -> { to, chunkId, bytes, sent }
+  let chunksIn = 0;
+  let chunksOut = 0;
+
+  function myClaim() {
+    return {
+      t: 'claim',
+      shard: shardId,
+      live: booted,
+      version: topo.version,
+      owner: booted ? Array.from(topo.owner) : null,
+      snap: snap ? { tick: snap.tick, version: snap.version, chunks: [...snap.chunks.keys()] } : null,
+    };
+  }
+
+  function bootRegion() {
+    const ids = topo.chunksOf(shardId);
+    region.chunks = new Map(ids.map((id) => [id, region.makeChunk(id)]));
+    const missing = snap ? region.applySnapshot(snap, ids) : ids;
+    region.initChunks(missing);
+    region.recomputeBorders();
+    snap = null; // free memory; later claims only need liveness
+    booted = true;
+    for (const id of region.chunks.keys()) applyPendingSubs(id);
+    log(
+      `booted with map v${topo.version}: ${region.chunks.size} chunks (${ids.length - missing.length} restored), ` +
+        `neighbours [${region.neighbours}], ${region.entityCount()} entities`,
+    );
+    bootResolve();
+  }
+
+  function applyMap(msg) {
+    if (!booted) {
+      topo.setOwners(msg.owner, msg.version);
+      bootRegion();
+      return;
+    }
+    if (msg.version <= topo.version) return;
+    const owners = msg.owner.slice();
+    // Never let a map take away a chunk we hold (it would orphan it); the
+    // coordinator corrects itself from our load reports.
+    for (const id of region.chunks.keys()) owners[id] = shardId;
+    topo.setOwners(owners, msg.version);
+    region.recomputeBorders();
+  }
+
+  // Hand chunk `id` (and everything in it) to shard `to`.
+  function giveChunk(id, to) {
+    const ok = region.chunks.has(id) && region.chunks.size > 1 && to !== shardId;
+    if (ok) {
+      topo.owner[id] = to;
+      const chunk = region.removeChunk(id);
+      for (const [pid, cid] of cursorChunk) if (cid === id) cursorChunk.delete(pid);
+      const seq = ++xferSeq;
+      xferOut.set(seq, { to, chunkId: id, bytes: region.encodeChunkTransfer(chunk, seq, epoch), sent: false });
+      sendTransfers();
+      chunksOut++;
+    }
+    const msg = { t: 'moved', chunk: id, from: shardId, to, ok };
+    if (shardId === 0) coordinator.onMoved(msg);
+    else peer(0).send(JSON.stringify(msg));
+  }
+
+  function sendTransfers() {
+    for (const x of xferOut.values()) {
+      if (x.sent) continue;
+      const link = peer(x.to);
+      if (link.send(x.bytes)) x.sent = true;
+    }
+  }
+
+  function receiveChunk(ws, buf) {
+    const { from, epoch: e, seq, chunk } = region.decodeChunkTransfer(buf);
+    const key = `x${from}:${e}`;
+    let seen = seenBatches.get(key);
+    if (!seen) seenBatches.set(key, (seen = new Set()));
+    if (!seen.has(seq)) {
+      seen.add(seq);
+      if (!region.chunks.has(chunk.id)) {
+        topo.owner[chunk.id] = shardId;
+        region.addChunk(chunk);
+        chunksIn++;
+        applyPendingSubs(chunk.id);
+        log(`received chunk ${chunk.id} (${chunk.entities.length} entities) from shard ${from}`);
+      }
+    }
+    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'xack', seq }));
+  }
+
+  // Messages from the coordinator (shard 0) to this shard.
+  function onCoordinatorMessage(msg) {
+    if (msg.t === 'map') applyMap(msg);
+    else if (msg.t === 'move') giveChunk(msg.chunk, msg.to);
+  }
+
+  // Coordinator (shard 0 only).
+  const shardSockets = new Map(); // peer shard -> its incoming ws (to reply on)
+  const coordinator =
+    shardId === 0
+      ? new Coordinator({
+          topo,
+          log,
+          opts: {
+            balance: (opts.balance ?? cfg.get('balance', 'BALANCE', 'true')) !== 'false' && opts.balance !== false,
+            hotMs: Number(opts.hotMs ?? cfg.get('hot-ms', 'HOT_MS', 0.6 * (1000 / tickHz))),
+            ratio: Number(opts.balanceRatio ?? cfg.get('balance-ratio', 'BALANCE_RATIO', 0.7)),
+            cooldownMs: Number(opts.balanceCooldownMs ?? cfg.get('balance-cooldown-ms', 'BALANCE_COOLDOWN_MS', 1000)),
+          },
+          send: (shard, msg) => {
+            if (shard === 0) onCoordinatorMessage(msg);
+            else {
+              const ws = shardSockets.get(shard);
+              if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+            }
+          },
+          broadcast: (msg) => {
+            const text = JSON.stringify(msg);
+            for (const ws of shardSockets.values()) if (ws.readyState === 1) ws.send(text);
+            for (const ws of gateways.keys()) if (ws.readyState === 1) ws.send(text);
+            onCoordinatorMessage(msg);
+          },
+        })
+      : null;
+
+  function onShardJson(peerShard, ws, msg) {
+    if (!coordinator) return;
+    if (msg.t === 'claim') {
+      shardSockets.set(msg.shard, ws);
+      coordinator.addClaim(msg);
+    } else if (msg.t === 'load') coordinator.onLoad(msg);
+    else if (msg.t === 'moved') coordinator.onMoved(msg);
+  }
+
+  function loadReport() {
+    const chunks = [];
+    for (const c of region.chunks.values()) chunks.push([c.id, c.entities.length]);
+    return { t: 'load', shard: shardId, tickMs: stats.tickMs, entities: region.entityCount(), chunks };
+  }
 
   function handlePeerBinary(ws, buf) {
     const type = buf[0];
     if (type === I_GHOST) region.applyGhosts(buf);
+    else if (type === I_XFER) receiveChunk(ws, buf);
     else if (type === I_MIGRATE) {
       const { from, epoch: e, seq, entities } = region.decodeMigration(buf);
       const key = `${from}:${e}`;
@@ -315,6 +506,10 @@ export async function startShard(opts = {}) {
           peers: [...peerLinks].map(([id, l]) => ({ id, open: l.open })),
           migratedIn,
           migratedOut,
+          chunksIn,
+          chunksOut,
+          mapVersion: topo.version,
+          coordinator: coordinator ? { moves: coordinator.moves, pending: coordinator.pending } : undefined,
           ...stats,
         }),
       );
@@ -339,6 +534,7 @@ export async function startShard(opts = {}) {
           if (role === 'gateway') {
             gateways.set(ws, { id: hello.id, bytesOut: 0, queue: [] });
             log(`gateway ${hello.id} connected`);
+            if (coordinator && coordinator.ready) ws.send(JSON.stringify(coordinator.mapMessage()));
           } else if (role === 'shard') {
             peerId = Number(hello.id);
           }
@@ -348,7 +544,11 @@ export async function startShard(opts = {}) {
           if (isBinary) handleGatewayBinary(ws, data);
           else handleGatewayJson(ws, JSON.parse(data.toString()));
         } else if (role === 'shard') {
-          if (isBinary) handlePeerBinary(ws, data);
+          // While frozen (tests/admin), hold peer traffic so the state stays
+          // exactly what was last sent to clients.
+          if (isBinary && paused) pausedPeerQueue.push([ws, data]);
+          else if (isBinary) handlePeerBinary(ws, data);
+          else onShardJson(peerId, ws, JSON.parse(data.toString()));
         }
       } catch (err) {
         log('bad message', err.message);
@@ -361,6 +561,7 @@ export async function startShard(opts = {}) {
         log('gateway disconnected');
       } else if (role === 'shard' && peerId >= 0) {
         region.dropPeer(peerId);
+        if (shardSockets.get(peerId) === ws) shardSockets.delete(peerId);
       }
     });
     ws.on('error', () => {});
@@ -368,6 +569,22 @@ export async function startShard(opts = {}) {
 
   await new Promise((resolve) => server.listen(port, host, resolve));
   log(`listening on ${host}:${port}`);
+
+  // ---------------------------------------------------------------- boot
+  // Shard 0 collects claims (up to BOOT_WAIT ms or until every shard has
+  // reported) and decides the map; the others wait for it.
+  if (coordinator) {
+    coordinator.addClaim(myClaim());
+    const bootWait = Number(opts.bootWait ?? cfg.get('boot-wait', 'BOOT_WAIT', 6000));
+    const t0 = Date.now();
+    while (!coordinator.allClaimed() && Date.now() - t0 < bootWait) await new Promise((r) => setTimeout(r, 50));
+    coordinator.decideBoot();
+  } else {
+    peer(0);
+    log('waiting for the ownership map from shard 0');
+  }
+  await bootPromise;
+  for (const n of region.neighbours) peer(n);
 
   // ----------------------------------------------------------- tick loop
   const dt = 1 / tickHz;
@@ -410,9 +627,10 @@ export async function startShard(opts = {}) {
       }
     }
     for (const n of region.neighbours) {
-      const link = peerLinks.get(n);
-      if (link && link.open) link.send(region.encodeGhosts(n));
+      const link = peer(n);
+      if (link.open) link.send(region.encodeGhosts(n));
     }
+    if (xferOut.size) sendTransfers();
 
     const now = Date.now();
     if (region.tick % netEvery === 0) {
@@ -498,6 +716,14 @@ export async function startShard(opts = {}) {
       tickMsAcc = 0;
       stats.tickMsMax = 0;
       secondStart = nowP;
+      // Load report -> coordinator, which may rebalance chunk ownership.
+      if (coordinator) {
+        coordinator.onLoad(loadReport());
+        coordinator.tick();
+      } else {
+        const l = peerLinks.get(0);
+        if (l && l.open) l.send(JSON.stringify(loadReport()));
+      }
       // Forget cursor locations whose cursor already expired or was cleared.
       for (const [pid, id] of cursorChunk) {
         const c = region.chunks.get(id);
@@ -506,7 +732,6 @@ export async function startShard(opts = {}) {
     }
   }
 
-  let paused = false;
   function loop() {
     if (stopped) return;
     try {
@@ -531,8 +756,15 @@ export async function startShard(opts = {}) {
     },
     resume() {
       paused = false;
+      for (const [ws, data] of pausedPeerQueue.splice(0)) handlePeerBinary(ws, data);
     },
     save: saveSnapshotSync,
+    coordinator,
+    // Test / admin hook (shard 0 only): move a chunk now.
+    requestMove(chunk, to) {
+      if (!coordinator) throw new Error('only shard 0 coordinates');
+      return coordinator.requestMove(chunk, to);
+    },
     close() {
       stopped = true;
       if (snapTimer) clearInterval(snapTimer);

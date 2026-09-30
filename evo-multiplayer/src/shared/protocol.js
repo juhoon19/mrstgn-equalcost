@@ -25,6 +25,7 @@ export const I_ACTIONS = 101;
 export const I_SUMMARY = 102;
 export const I_MIGRATE = 110;
 export const I_GHOST = 111;
+export const I_XFER = 112; // chunk handoff between shards (dynamic load balancing)
 
 // Chunk frame flags
 export const F_KEY = 1;

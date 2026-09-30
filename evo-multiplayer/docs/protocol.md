@@ -72,6 +72,7 @@ varint 事件数, 每个: u8 种类, varint pid, u16 qx, u16 qy,
 - 网关 → 分片 JSON：`sub`/`unsub`（区块列表 + `tier`）、`player`（pid/名字/颜色注册）、`chat`、`online`（该网关在线数，发给 0 号分片汇总）。
 - 网关 → 分片二进制：`I_ACTIONS`(101)、`I_CURSORS`(100)，每 50ms 按分片批量。
 - 分片 → 网关：`S_BATCH` 包着 `S_CHUNK`/`S_FIELD`/`S_EVENTS`/`I_SUMMARY`(102)；JSON `lb`（排行榜/人口/tidi/在线）。
-- 分片 → 分片：`I_GHOST`(111) 每 tick、`I_MIGRATE`(110) 按需。
+- 分片 → 分片：`I_GHOST`(111) 每 tick；`I_MIGRATE`(110) 按需，对方回 JSON `mack`；`I_XFER`(112) 整块交接，对方回 `xack`。迁移和交接都带（发送方纪元 u32, 序号 varint）用于确认和去重。
+- 分片 ↔ 协调者（0 号分片）JSON：`claim`（启动/重连时：是否在运行、当前地图、快照里有哪些区块和快照 tick）、`load`（每秒：tick 耗时、实体数、持有的区块及实体数）、`moved`（交接完成/拒绝）；协调者发 `move`（把某区块交给谁）和 `map`（`{version, owner:[每个区块的分片号]}`，也发给所有网关）。
 
 **内部端口不要暴露到公网**（共享密钥只防误连，不是安全边界）。

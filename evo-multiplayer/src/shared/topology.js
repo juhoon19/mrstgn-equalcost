@@ -49,6 +49,7 @@ export class Topology {
         this.owner[cy * chunksX + cx] = by * sx + bx;
       }
     }
+    this.version = 0; // bumped by the coordinator on every ownership change
     const used = new Set(this.owner);
     if (used.size !== shardCount) {
       throw new Error(
@@ -56,6 +57,23 @@ export class Topology {
           `(some shard would own nothing); pick a shard count that factors into the chunk grid`,
       );
     }
+  }
+
+  // Replaces the chunk -> shard map (dynamic load balancing). Geometry and
+  // the shard count never change at runtime; only who owns which chunk.
+  setOwners(owners, version) {
+    if (owners.length !== this.owner.length) throw new Error('owner map size mismatch');
+    for (let i = 0; i < owners.length; i++) {
+      const o = owners[i];
+      if (!Number.isInteger(o) || o < 0 || o >= this.shardCount) throw new Error(`bad owner ${o} for chunk ${i}`);
+    }
+    this.owner.set(owners);
+    this.version = version;
+  }
+
+  // The initial (static) layout, used for chunks nobody has claimed.
+  defaultOwners() {
+    return Array.from(new Topology(this.world, this.shardCount).owner);
   }
 
   get width() {

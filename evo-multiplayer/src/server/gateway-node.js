@@ -173,6 +173,35 @@ export async function startGateway(opts = {}) {
     shardLinks.push(link);
   });
 
+  // Chunk ownership changes at runtime (load balancing). The coordinator
+  // (shard 0) broadcasts the map; streams of moved chunks are re-subscribed
+  // at the new owner, and their clients resync from its first keyframe.
+  function applyMap(msg) {
+    if (!Array.isArray(msg.owner) || msg.version <= topo.version) return;
+    const before = Array.from(topo.owner);
+    try {
+      topo.setOwners(msg.owner, msg.version);
+    } catch (err) {
+      log('bad map', err.message);
+      return;
+    }
+    let moved = 0;
+    for (const [k, st] of chunkState) {
+      const id = k >> 1;
+      const from = before[id];
+      const to = topo.owner[id];
+      if (from === to) continue;
+      moved++;
+      st.cache = [];
+      for (const c of st.clients) c.chunks.set(k, 0);
+      pendingUnsub[to].delete(k);
+      pendingSub[to].add(k);
+      pendingSub[from].delete(k);
+      pendingUnsub[from].add(k);
+    }
+    if (moved) log(`map v${msg.version}: re-subscribed ${moved} stream(s)`);
+  }
+
   function playerRecord(c) {
     return { pid: c.pid, name: c.name, rgb: c.rgb, hue: c.hue };
   }
@@ -181,6 +210,7 @@ export async function startGateway(opts = {}) {
     if (!isBinary) {
       const msg = JSON.parse(data.toString());
       if (msg.t === 'lb') lbByShard.set(shard, msg);
+      else if (msg.t === 'map') applyMap(msg);
       return;
     }
     if (data[0] === S_BATCH) unpackBatch(data, (m) => onShardBinary(m));
@@ -764,6 +794,7 @@ export async function startGateway(opts = {}) {
 
   return {
     port: server.address().port,
+    topo,
     metrics,
     close() {
       clearInterval(flushTimer);

@@ -104,6 +104,9 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `FIELD_EVERY` / `FIELD_NET_RES` | 化学场发送间隔(tick) / 发送分辨率 | 20 / 8 |
 | `DATA_DIR` | 分片快照目录（空 = 不持久化） | `launch.js`：`./data`；Docker：`/data` |
 | `SNAPSHOT_EVERY` | 快照间隔（秒） | 30 |
+| `BALANCE` | 动态负载均衡（`false` 关闭，区块归属固定） | true |
+| `HOT_MS` / `BALANCE_RATIO` | 分片 tick 耗时超过多少毫秒算热 / 接收方须低于热分片的多少倍 | 30 / 0.7 |
+| `BOOT_WAIT` | 0 号分片冷启动时最多等其他分片报到多久（毫秒） | 6000 |
 | `SHARDS` / `GATEWAYS` / `WORLD` | `launch.js` 单机启动用 | 自动 / 自动 / 24x24 |
 
 ## 上线安全清单

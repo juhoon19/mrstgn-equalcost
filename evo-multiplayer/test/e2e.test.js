@@ -101,6 +101,65 @@ test('client replicas (both quality tiers) match the authoritative state exactly
   for (const s of shards) s.resume();
 });
 
+test('chunks handed between live shards: clients stay exact and every map agrees', async () => {
+  const c = client();
+  assert.ok(await until(() => c.welcome));
+  const W = 6 * 256;
+  c.ws.send(encodeView(0, 0, W, W, TIER_HI));
+  await sleep(1200);
+  const coord = shards[0];
+  const topo = coord.region.topo;
+  const done = new Set();
+  for (let k = 0; k < 8; k++) {
+    // A chunk on some shard's border (4-neighbour owned by another shard).
+    let plan = null;
+    for (let id = 0; id < topo.chunkCount && !plan; id++) {
+      if (done.has(id)) continue;
+      const s = topo.ownerOf(id);
+      if (topo.chunksOf(s).length <= 1) continue;
+      const [cx, cy] = topo.chunkXY(id);
+      for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+        if (!topo.inBounds(cx + dx, cy + dy)) continue;
+        const t = topo.ownerOf(topo.chunkId(cx + dx, cy + dy));
+        if (t !== s) {
+          plan = { id, to: t };
+          break;
+        }
+      }
+    }
+    assert.ok(plan);
+    done.add(plan.id);
+    assert.ok(await until(() => coord.requestMove(plan.id, plan.to)), 'coordinator busy');
+    assert.ok(await until(() => !coord.coordinator.pending), 'move never confirmed');
+    assert.ok(await until(() => shards[plan.to].region.chunks.has(plan.id)), 'chunk never arrived');
+  }
+  await sleep(1500); // new owners' keyframes reach the client
+  for (const s of shards) s.pause();
+  await sleep(400);
+  // Every chunk lives on exactly one shard, and every map says so.
+  const version = topo.version;
+  for (let id = 0; id < topo.chunkCount; id++) {
+    const holders = shards.filter((s) => s.region.chunks.has(id)).map((s) => s.region.shardId);
+    assert.equal(holders.length, 1, `chunk ${id} held by [${holders}]`);
+    for (const s of shards) assert.equal(s.region.topo.ownerOf(id), holders[0], `shard ${s.region.shardId} map, chunk ${id}`);
+    assert.equal(gateway.topo.ownerOf(id), holders[0], `gateway map, chunk ${id}`);
+  }
+  for (const s of shards) assert.equal(s.region.topo.version, version);
+  assert.equal(coord.coordinator.moves >= 8, true);
+  // And the client still sees exactly the authoritative world.
+  const truth = new Map();
+  for (const s of shards) for (const ch of s.region.chunks.values()) for (const e of ch.entities) truth.set(e.id, e);
+  assert.equal(c.world.entities.size, truth.size, 'entity count differs after handoffs');
+  for (const [id, e] of truth) {
+    const got = c.world.entities.get(id);
+    assert.ok(got, `client is missing entity ${id}`);
+    assert.ok(Math.abs(got.x - e.x) <= 0.5 / POS_QUANT + 1e-6);
+    assert.ok(Math.abs(got.y - e.y) <= 0.5 / POS_QUANT + 1e-6);
+  }
+  for (const s of shards) s.resume();
+  c.ws.close();
+});
+
 test('seeding creates organisms owned by the player; others see the effect and cursor', async () => {
   const a = client({ name: 'alice' });
   const b = client({ name: 'bob' });

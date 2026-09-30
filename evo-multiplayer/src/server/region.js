@@ -13,7 +13,7 @@
 //    eaten) are not allowed; the game module must respect this.
 
 import { Writer, Reader } from '../shared/codec.js';
-import { I_MIGRATE, I_GHOST } from '../shared/protocol.js';
+import { I_MIGRATE, I_GHOST, I_XFER } from '../shared/protocol.js';
 
 export class Entity {
   constructor(id) {
@@ -111,31 +111,8 @@ export class Region {
     this.C = C;
     this.fieldCell = chunkSize / G;
     this.chunks = new Map();
-    for (const id of topo.chunksOf(shardId)) {
-      const [cx, cy] = topo.chunkXY(id);
-      this.chunks.set(id, new Chunk(id, cx, cy, G * G * C));
-    }
-    this.neighbours = topo.neighbourShards(shardId);
-
-    // Border chunks: owned chunks adjacent to a chunk owned by someone else,
-    // grouped by that someone, so ghost messages are built per neighbour.
-    this.borderChunksFor = new Map();
-    for (const n of this.neighbours) this.borderChunksFor.set(n, []);
-    for (const chunk of this.chunks.values()) {
-      const seen = new Set();
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = chunk.cx + dx;
-          const ny = chunk.cy + dy;
-          if (!topo.inBounds(nx, ny)) continue;
-          const o = topo.ownerOf(topo.chunkId(nx, ny));
-          if (o !== shardId && !seen.has(o)) {
-            seen.add(o);
-            this.borderChunksFor.get(o).push(chunk);
-          }
-        }
-      }
-    }
+    for (const id of topo.chunksOf(shardId)) this.chunks.set(id, this.makeChunk(id));
+    this.recomputeBorders();
 
     this.ghostsFrom = new Map(); // shardId -> Entity[]
     this.ghostEdges = new Map(); // foreign chunkId -> Float32Array(4*G*C)
@@ -144,6 +121,65 @@ export class Region {
     this.local = []; // flat list of live local entities, rebuilt each tick
     this.maxEntitiesPerChunk = 400;
     this.fieldEvery = 2;
+  }
+
+  makeChunk(id) {
+    const [cx, cy] = this.topo.chunkXY(id);
+    return new Chunk(id, cx, cy, this.G * this.G * this.C);
+  }
+
+  // Neighbour shards and, per neighbour, our chunks that touch its chunks
+  // (incl. diagonally). Recomputed whenever ownership changes.
+  recomputeBorders() {
+    const topo = this.topo;
+    this.borderChunksFor = new Map();
+    for (const chunk of this.chunks.values()) {
+      const seen = new Set();
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = chunk.cx + dx;
+          const ny = chunk.cy + dy;
+          if (!topo.inBounds(nx, ny)) continue;
+          const o = topo.ownerOf(topo.chunkId(nx, ny));
+          if (o === this.shardId || seen.has(o)) continue;
+          seen.add(o);
+          let list = this.borderChunksFor.get(o);
+          if (!list) this.borderChunksFor.set(o, (list = []));
+          list.push(chunk);
+        }
+      }
+    }
+    this.neighbours = [...this.borderChunksFor.keys()].sort((a, b) => a - b);
+  }
+
+  // Dynamic ownership: hand a chunk (with everything in it) to another
+  // shard, or take one over. Callers update topo.owner around these.
+  removeChunk(id) {
+    const chunk = this.chunks.get(id);
+    if (!chunk) return null;
+    this.chunks.delete(id);
+    this.recomputeBorders();
+    return chunk;
+  }
+
+  addChunk(chunk) {
+    for (const e of chunk.entities) e.chunk = chunk.id;
+    this.chunks.set(chunk.id, chunk);
+    this.ghostEdges.delete(chunk.id);
+    this.recomputeBorders();
+  }
+
+  // Runs game.init on just these (new, empty) chunks.
+  initChunks(ids) {
+    const all = this.chunks;
+    this.chunks = new Map(ids.map((id) => [id, all.get(id)]).filter(([, c]) => c));
+    try {
+      this.game.init(this);
+      this.flushSpawns();
+    } finally {
+      for (const [id, c] of this.chunks) all.set(id, c);
+      this.chunks = all;
+    }
   }
 
   // ---------------------------------------------------------------- entities
@@ -234,7 +270,12 @@ export class Region {
         this.hashInsert(e);
       }
     }
-    for (const list of this.ghostsFrom.values()) for (const g of list) this.hashInsert(g);
+    // Skip ghosts standing in our own chunks: right after a chunk handoff the
+    // previous owner's last ghost message can still describe entities that
+    // now live here.
+    for (const list of this.ghostsFrom.values()) {
+      for (const g of list) if (!this.chunks.has(this.topo.chunkAt(g.x, g.y))) this.hashInsert(g);
+    }
   }
 
   // Calls fn(entity) for every local or ghost entity whose hash cell overlaps
@@ -511,14 +552,29 @@ export class Region {
 
   rebucket() {
     const out = new Map();
+    let limbo = null;
     const emigrate = (e, owner) => {
+      if (owner === this.shardId) {
+        // The map says the chunk is ours but it has not arrived yet (chunk
+        // handoff in flight): hold the entity until it does.
+        (limbo || (limbo = [])).push(e);
+        return;
+      }
       let list = out.get(owner);
       if (!list) out.set(owner, (list = []));
       list.push(e);
     };
     if (this._strays) {
-      for (const e of this._strays) emigrate(e, this.topo.ownerAt(e.x, e.y));
+      const strays = this._strays;
       this._strays = null;
+      for (const e of strays) {
+        if (e.dead) continue;
+        const dest = this.chunks.get(this.topo.chunkAt(e.x, e.y));
+        if (dest) {
+          e.chunk = dest.id;
+          dest.entities.push(e);
+        } else emigrate(e, this.topo.ownerAt(e.x, e.y));
+      }
     }
     for (const chunk of this.chunks.values()) {
       const list = chunk.entities;
@@ -542,6 +598,7 @@ export class Region {
       }
       list.length = w;
     }
+    if (limbo) this._strays = limbo.length > 50000 ? limbo.slice(-50000) : limbo;
     return out;
   }
 
@@ -611,58 +668,111 @@ export class Region {
   // Whole-shard snapshot: clock, id counter, every owned chunk's chemical
   // field and entities (with game data). Restored only into a shard with the
   // same id, shard count and world geometry.
-  serialize() {
-    const w = new Writer(1 << 20);
-    const { chunksX, chunksY, chunkSize, fieldRes, channels } = this.world;
-    w.str('evo-shard-v1').varint(this.shardId).varint(this.topo.shardCount);
-    w.varint(chunksX).varint(chunksY).varint(chunkSize).varint(fieldRes).varint(channels);
-    w.varint(this.tick).f32(this.time).varint(this.nextSerial);
-    w.varint(this.chunks.size);
-    for (const chunk of this.chunks.values()) {
-      w.varint(chunk.id);
-      for (let i = 0; i < chunk.field.length; i++) w.f32(chunk.field[i]);
-      w.varint(chunk.entities.length);
-      for (const e of chunk.entities) this.writeEntity(w, e);
+  writeChunk(w, chunk) {
+    w.varint(chunk.id);
+    for (let i = 0; i < chunk.field.length; i++) w.f32(chunk.field[i]);
+    w.varint(chunk.entities.length);
+    for (const e of chunk.entities) this.writeEntity(w, e);
+  }
+
+  readChunk(r) {
+    const chunk = this.makeChunk(r.varint());
+    for (let i = 0; i < chunk.field.length; i++) chunk.field[i] = r.f32();
+    const m = r.varint();
+    for (let i = 0; i < m; i++) {
+      const e = this.readEntity(r);
+      e.chunk = chunk.id;
+      chunk.entities.push(e);
     }
+    return chunk;
+  }
+
+  // Chunk handoff message (see shard-node: acked like migrations).
+  encodeChunkTransfer(chunk, seq, epoch) {
+    const w = new Writer(4096 + chunk.entities.length * 400);
+    w.u8(I_XFER).varint(this.shardId).u32(epoch).varint(seq);
+    this.writeChunk(w, chunk);
     return w.finish();
   }
 
-  // Returns false (and changes nothing) if the snapshot does not fit.
-  restore(bytes) {
+  decodeChunkTransfer(bytes) {
     const r = new Reader(bytes);
-    if (r.str() !== 'evo-shard-v1') return false;
+    r.u8();
+    const from = r.varint();
+    const epoch = r.u32();
+    const seq = r.varint();
+    return { from, epoch, seq, chunk: this.readChunk(r) };
+  }
+
+  // Whole-shard snapshot: ownership map (with version), clock, id counter,
+  // every owned chunk's chemical field and entities (with game data).
+  serialize() {
+    const w = new Writer(1 << 20);
     const { chunksX, chunksY, chunkSize, fieldRes, channels } = this.world;
-    const header = [r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.varint()];
-    const want = [this.shardId, this.topo.shardCount, chunksX, chunksY, chunkSize, fieldRes, channels];
-    if (header.some((v, i) => v !== want[i])) return false;
-    const tick = r.varint();
-    const time = r.f32();
-    const nextSerial = r.varint();
-    const n = r.varint();
-    const loaded = [];
-    for (let k = 0; k < n; k++) {
-      const id = r.varint();
-      const field = new Float32Array(this.G * this.G * this.C);
-      for (let i = 0; i < field.length; i++) field[i] = r.f32();
-      const m = r.varint();
-      const ents = [];
-      for (let i = 0; i < m; i++) ents.push(this.readEntity(r));
-      loaded.push({ id, field, ents });
+    w.str('evo-shard-v2').varint(this.shardId).varint(this.topo.shardCount);
+    w.varint(chunksX).varint(chunksY).varint(chunkSize).varint(fieldRes).varint(channels);
+    w.varint(this.topo.version);
+    for (let i = 0; i < this.topo.owner.length; i++) w.varint(this.topo.owner[i]);
+    w.varint(this.tick).f32(this.time).varint(this.nextSerial);
+    w.varint(this.chunks.size);
+    for (const chunk of this.chunks.values()) this.writeChunk(w, chunk);
+    return w.finish();
+  }
+
+  // Parses a snapshot without applying it; null if it does not belong to
+  // this shard / world geometry.
+  parseSnapshot(bytes) {
+    try {
+      const r = new Reader(bytes);
+      if (r.str() !== 'evo-shard-v2') return null;
+      const { chunksX, chunksY, chunkSize, fieldRes, channels } = this.world;
+      const header = [r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.varint(), r.varint()];
+      const want = [this.shardId, this.topo.shardCount, chunksX, chunksY, chunkSize, fieldRes, channels];
+      if (header.some((v, i) => v !== want[i])) return null;
+      const version = r.varint();
+      const owner = [];
+      for (let i = 0; i < this.topo.chunkCount; i++) owner.push(r.varint());
+      const tick = r.varint();
+      const time = r.f32();
+      const nextSerial = r.varint();
+      const n = r.varint();
+      const chunks = new Map();
+      for (let k = 0; k < n; k++) {
+        const c = this.readChunk(r);
+        chunks.set(c.id, c);
+      }
+      return { version, owner, tick, time, nextSerial, chunks };
+    } catch {
+      return null;
     }
-    for (const c of this.chunks.values()) c.entities = [];
-    for (const { id, field, ents } of loaded) {
-      const chunk = this.chunks.get(id);
-      if (!chunk) continue;
-      chunk.field.set(field);
-      for (const e of ents) e.chunk = id;
-      chunk.entities = ents;
-    }
-    this.tick = tick;
-    this.time = time;
+  }
+
+  // Loads clock/id counter and the snapshot's copy of every chunk in `ids`
+  // that we own; returns the ids that had no saved copy.
+  applySnapshot(snap, ids) {
+    this.tick = snap.tick;
+    this.time = snap.time;
     // After a crash the snapshot may be up to SNAPSHOT_EVERY old, and ids
     // issued since then may still be alive on other shards: skip ahead so
     // they are never handed out twice.
-    this.nextSerial = nextSerial + 1000000;
+    this.nextSerial = snap.nextSerial + 1000000;
+    const missing = [];
+    for (const id of ids) {
+      const saved = snap.chunks.get(id);
+      if (saved && this.chunks.has(id)) {
+        this.chunks.set(id, saved);
+      } else missing.push(id);
+    }
+    this.recomputeBorders();
+    return missing;
+  }
+
+  // Convenience: restore every chunk we currently own. false = incompatible.
+  restore(bytes) {
+    const snap = this.parseSnapshot(bytes);
+    if (!snap) return false;
+    const missing = this.applySnapshot(snap, [...this.chunks.keys()]);
+    for (const id of missing) this.chunks.get(id).entities = [];
     return true;
   }
 
