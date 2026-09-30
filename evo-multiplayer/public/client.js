@@ -125,8 +125,19 @@ function connect() {
     );
   };
   ws.onmessage = (ev) => onMessage(ev.data);
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     connected = false;
+    if (ev.code === 4003) {
+      setStatus('已被封禁');
+      addChatLine('系统', '你已被管理员封禁，无法进入。');
+      return; // don't hammer the server
+    }
+    if (ev.code === 4001) {
+      setStatus('已被踢出');
+      addChatLine('系统', '你被管理员踢出，10 秒后自动重连。');
+      setTimeout(connect, 10000);
+      return;
+    }
     setStatus('已断开，重连中…');
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(8000, reconnectDelay * 2);
@@ -144,6 +155,7 @@ function onMessage(data) {
     const msg = JSON.parse(data);
     if (msg.t === 'welcome') onWelcome(msg);
     else if (msg.t === 'stats') onStats(msg);
+    else if (msg.t === 'notice') addChatLine('系统', msg.text);
     return;
   }
   bytesIn += data.byteLength;

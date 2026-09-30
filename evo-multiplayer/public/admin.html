@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>原始汤 · 运维后台</title>
+    <style>
+      :root {
+        --bg: #0a0f15;
+        --panel: #101821;
+        --line: #1f2c38;
+        --text: #d8e4ee;
+        --muted: #7f93a4;
+        --accent: #35d49a;
+        --warn: #f0b14a;
+        --bad: #ef6a6a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.45 system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      }
+      header {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--line);
+        flex-wrap: wrap;
+      }
+      header h1 {
+        font-size: 16px;
+        margin: 0 12px 0 0;
+      }
+      input,
+      button,
+      select {
+        font: inherit;
+        color: var(--text);
+        background: #0c131a;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 5px 8px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      button.bad:hover {
+        border-color: var(--bad);
+      }
+      main {
+        display: grid;
+        grid-template-columns: minmax(300px, 420px) 1fr;
+        gap: 14px;
+        padding: 14px 16px;
+      }
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 14px;
+        min-width: 0;
+      }
+      h2 {
+        font-size: 13px;
+        margin: 0 0 8px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .kpis {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+      }
+      .kpi b {
+        display: block;
+        font-size: 20px;
+      }
+      .kpi span {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 4px 6px;
+        border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      td.wrap {
+        white-space: normal;
+        word-break: break-word;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .scroll {
+        max-height: 420px;
+        overflow: auto;
+      }
+      canvas {
+        width: 100%;
+        image-rendering: pixelated;
+        border-radius: 6px;
+        background: #0b1118;
+        cursor: crosshair;
+      }
+      .legend span {
+        display: inline-block;
+        margin-right: 10px;
+      }
+      .sw {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        margin-right: 4px;
+        vertical-align: -1px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .err {
+        color: var(--bad);
+      }
+      .row-actions button {
+        padding: 1px 6px;
+        font-size: 12px;
+      }
+      #login {
+        max-width: 360px;
+        margin: 80px auto;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>原始汤 · 运维后台</h1>
+      <span id="status" class="muted">未登录</span>
+      <span style="flex: 1"></span>
+      <label class="muted">负载均衡 <input type="checkbox" id="balance" /></label>
+      <button id="logout">退出</button>
+    </header>
+
+    <section id="login">
+      <h2>管理员口令（服务器的 ADMIN_TOKEN）</h2>
+      <form id="login-form"><input id="token" type="password" style="width: 100%" autocomplete="current-password" /></form>
+      <p class="muted">口令只保存在本页的会话里。</p>
+      <p id="login-err" class="err"></p>
+    </section>
+
+    <main id="app" hidden>
+      <div>
+        <section>
+          <h2>集群</h2>
+          <div class="kpis">
+            <div class="kpi"><b id="k-online">–</b><span>在线</span></div>
+            <div class="kpi"><b id="k-ent">–</b><span>实体</span></div>
+            <div class="kpi"><b id="k-map">–</b><span>地图版本</span></div>
+            <div class="kpi"><b id="k-moves">–</b><span>区块搬迁</span></div>
+          </div>
+        </section>
+        <section>
+          <h2>区块归属（颜色 = 分片，亮度 = 实体数）· 点击区块可手动搬迁</h2>
+          <canvas id="map" width="480" height="480"></canvas>
+          <div class="legend" id="legend"></div>
+        </section>
+        <section>
+          <h2>分片</h2>
+          <table>
+            <thead>
+              <tr><th>分片</th><th>tick ms（平均/当前）</th><th>实体</th><th>区块</th><th>上报</th></tr>
+            </thead>
+            <tbody id="shards"></tbody>
+          </table>
+        </section>
+        <section>
+          <h2>网关</h2>
+          <table>
+            <thead><tr><th>网关</th><th>在线</th></tr></thead>
+            <tbody id="gateways"></tbody>
+          </table>
+        </section>
+      </div>
+      <div>
+        <section>
+          <h2>聊天记录（全服，最新在上）</h2>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>时间</th><th>玩家</th><th>内容</th><th>操作</th></tr></thead>
+              <tbody id="chat"></tbody>
+            </table>
+          </div>
+        </section>
+        <section>
+          <h2>查找玩家</h2>
+          <form id="search-form" style="display: flex; gap: 6px; margin-bottom: 8px">
+            <input id="q" placeholder="名字或 pid" style="flex: 1" />
+            <button>查找</button>
+          </form>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>pid</th><th>名字</th><th>网关</th><th>最近在线</th><th>操作</th></tr></thead>
+              <tbody id="players"></tbody>
+            </table>
+          </div>
+        </section>
+        <section>
+          <h2>生效中的处罚</h2>
+          <table>
+            <thead><tr><th>#</th><th>类型</th><th>对象</th><th>到期</th><th>原因</th><th></th></tr></thead>
+            <tbody id="sanctions"></tbody>
+          </table>
+        </section>
+      </div>
+    </main>
+
+    <script type="module" src="admin.js"></script>
+  </body>
+</html>

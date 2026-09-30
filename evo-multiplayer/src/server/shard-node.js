@@ -18,6 +18,7 @@ import { Link, readClusterConfig } from './link.js';
 import { encodeChunkFrame, encodeField, encodeEvents } from './snapshot.js';
 import { loadGame } from './game-loader.js';
 import { Coordinator } from './coordinator.js';
+import { Control } from './control.js';
 
 export async function startShard(opts = {}) {
   const cfg = readClusterConfig();
@@ -206,6 +207,7 @@ export async function startShard(opts = {}) {
         for (const p of msg.p || []) {
           region.players.delete(p.pid);
           region.players.set(p.pid, { name: String(p.name).slice(0, 24), rgb: p.rgb >>> 0, hue: +p.hue || 0 });
+          if (control) control.notePlayer({ ...p, gw: gateways.get(ws)?.id });
         }
         while (region.players.size > 200000) region.players.delete(region.players.keys().next().value);
         break;
@@ -213,8 +215,18 @@ export async function startShard(opts = {}) {
         if (!region.ownsPoint(msg.x, msg.y)) break;
         const chunk = region.chunks.get(topo.chunkAt(msg.x, msg.y));
         chunk.events.push({ kind: EV_CHAT, pid: msg.pid, x: msg.x, y: msg.y, text: String(msg.text).slice(0, 200) });
+        // Every chat line also goes to the moderation log on shard 0.
+        const entry = { t: 'chatlog', pid: msg.pid, text: String(msg.text).slice(0, 200), x: msg.x, y: msg.y, shard: shardId };
+        if (control) control.noteChat(entry);
+        else {
+          const l = peerLinks.get(0);
+          if (l && l.open) l.send(JSON.stringify(entry));
+        }
         break;
       }
+      case 'admin':
+        handleAdmin(ws, msg);
+        break;
       case 'online':
         onlineByGateway.set(msg.gw, { n: msg.n, t: Date.now() });
         break;
@@ -453,11 +465,91 @@ export async function startShard(opts = {}) {
 
   function onShardJson(peerShard, ws, msg) {
     if (!coordinator) return;
-    if (msg.t === 'claim') {
+    if (msg.t === 'chatlog') {
+      control.noteChat(msg);
+    } else if (msg.t === 'claim') {
       shardSockets.set(msg.shard, ws);
       coordinator.addClaim(msg);
     } else if (msg.t === 'load') coordinator.onLoad(msg);
     else if (msg.t === 'moved') coordinator.onMoved(msg);
+  }
+
+  // ------------------------------------------------ admin (shard 0 only)
+  const control = shardId === 0 ? new Control({ dataDir, log }) : null;
+
+  function sanctionsMessage() {
+    return JSON.stringify({ t: 'sanctions', list: control.active() });
+  }
+  function broadcastToGateways(text) {
+    for (const ws of gateways.keys()) if (ws.readyState === 1) ws.send(text);
+  }
+
+  // Requests from the admin page, proxied by a gateway: { t:'admin', id, op, args }.
+  function handleAdmin(ws, msg) {
+    const reply = (ok, body) => {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'adminr', id: msg.id, ok, ...body }));
+    };
+    if (!control) return reply(false, { error: 'not the control shard' });
+    try {
+      const args = msg.args || {};
+      switch (msg.op) {
+        case 'state': {
+          const now = Date.now();
+          const chunkEntities = new Array(topo.chunkCount).fill(0);
+          const shards = [];
+          for (const [sid, l] of coordinator.loads) {
+            for (const [id, n] of l.chunks) if (id >= 0 && id < chunkEntities.length) chunkEntities[id] = n;
+            shards.push({ shard: sid, tickMs: +l.tickMs.toFixed(2), raw: l.raw, entities: l.entities, chunks: l.chunks.size, age: now - l.t });
+          }
+          shards.sort((a, b) => a.shard - b.shard);
+          let online = 0;
+          const gws = [];
+          for (const [gw, o] of onlineByGateway) {
+            if (now - o.t < 5000) {
+              online += o.n;
+              gws.push({ gateway: gw, online: o.n });
+            }
+          }
+          return reply(true, {
+            result: {
+              world: topo.world,
+              shardCount: topo.shardCount,
+              map: { version: topo.version, owner: Array.from(topo.owner) },
+              chunkEntities,
+              shards,
+              moves: coordinator.moves,
+              pending: coordinator.pending,
+              balance: coordinator.balance,
+              online,
+              gateways: gws,
+              knownPlayers: control.players.size,
+              chat: control.chat.slice(-100).reverse(),
+              sanctions: control.active(),
+            },
+          });
+        }
+        case 'players':
+          return reply(true, { result: control.search(args.q) });
+        case 'move':
+          return reply(true, { result: { started: coordinator.requestMove(Number(args.chunk), Number(args.to)) } });
+        case 'balance':
+          coordinator.balance = !!args.on;
+          return reply(true, { result: { balance: coordinator.balance } });
+        case 'ban':
+        case 'mute':
+        case 'kick':
+        case 'lift': {
+          const r = control.apply(msg.op, args);
+          if (r.changed) broadcastToGateways(sanctionsMessage());
+          if (r.kick.length) broadcastToGateways(JSON.stringify({ t: 'kick', pids: r.kick }));
+          return reply(true, { result: r.result });
+        }
+        default:
+          return reply(false, { error: `unknown op ${msg.op}` });
+      }
+    } catch (err) {
+      return reply(false, { error: err.message });
+    }
   }
 
   function loadReport() {
@@ -535,6 +627,7 @@ export async function startShard(opts = {}) {
             gateways.set(ws, { id: hello.id, bytesOut: 0, queue: [] });
             log(`gateway ${hello.id} connected`);
             if (coordinator && coordinator.ready) ws.send(JSON.stringify(coordinator.mapMessage()));
+            if (control) ws.send(sanctionsMessage());
           } else if (role === 'shard') {
             peerId = Number(hello.id);
           }
@@ -720,6 +813,10 @@ export async function startShard(opts = {}) {
       if (coordinator) {
         coordinator.onLoad(loadReport());
         coordinator.tick();
+        if (control.prune()) {
+          control.save();
+          broadcastToGateways(sanctionsMessage()); // something expired
+        }
       } else {
         const l = peerLinks.get(0);
         if (l && l.open) l.send(JSON.stringify(loadReport()));

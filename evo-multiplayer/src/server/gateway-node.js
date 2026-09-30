@@ -84,6 +84,8 @@ export async function startGateway(opts = {}) {
   const maxPerIp = Number(opts.maxPerIp ?? cfg.get('max-per-ip', 'MAX_PER_IP', 16));
   const maxClients = Number(opts.maxClients ?? cfg.get('max-clients', 'MAX_CLIENTS', 20000));
   const trustProxy = (opts.trustProxy ?? cfg.get('trust-proxy', 'TRUST_PROXY', '')) === 'true' || opts.trustProxy === true;
+  const adminToken = String(opts.adminToken ?? cfg.get('admin-token', 'ADMIN_TOKEN', ''));
+  const blocklistFile = String(opts.blocklist ?? cfg.get('blocklist', 'BLOCKLIST', ''));
   const ipHeader = String(opts.ipHeader ?? cfg.get('ip-header', 'IP_HEADER', '')).toLowerCase();
   const proxyHops = Math.max(1, Number(opts.proxyHops ?? cfg.get('proxy-hops', 'PROXY_HOPS', 1)));
   const origins = String(opts.origins ?? cfg.get('origins', 'ALLOWED_ORIGINS', ''))
@@ -203,7 +205,118 @@ export async function startGateway(opts = {}) {
   }
 
   function playerRecord(c) {
-    return { pid: c.pid, name: c.name, rgb: c.rgb, hue: c.hue };
+    return { pid: c.pid, name: c.name, rgb: c.rgb, hue: c.hue, ipHash: c.ipHash };
+  }
+
+  // ---------------------------------------------------------- moderation
+  // Sanctions are decided on shard 0 (see control.js) and pushed to every
+  // gateway, which enforces them: banned IPs are refused at the handshake,
+  // banned identities at hello, muted players' chat is dropped.
+  const bannedPids = new Map(); // pid -> until (0 = permanent)
+  const bannedIps = new Map(); // ipHash -> until
+  const mutedPids = new Map(); // pid -> until
+  function ipHashOf(ip) {
+    return crypto.createHmac('sha256', tokenSecret).update('ip:' + ip).digest('base64url').slice(0, 16);
+  }
+  const live = (until) => !until || until > Date.now();
+  function applySanctions(list) {
+    bannedPids.clear();
+    bannedIps.clear();
+    mutedPids.clear();
+    for (const s of list || []) {
+      const target = s.kind === 'mute' ? mutedPids : bannedPids;
+      if (Number.isInteger(s.pid)) target.set(s.pid, s.until || 0);
+      if (s.kind === 'ban' && s.ipHash) bannedIps.set(s.ipHash, s.until || 0);
+    }
+    for (const c of clients) {
+      if ((bannedPids.has(c.pid) && live(bannedPids.get(c.pid))) || (bannedIps.has(c.ipHash) && live(bannedIps.get(c.ipHash)))) {
+        c.ws.close(4003, 'banned');
+      }
+    }
+  }
+  const isBanned = (pid, ipHash) =>
+    (bannedPids.has(pid) && live(bannedPids.get(pid))) || (bannedIps.has(ipHash) && live(bannedIps.get(ipHash)));
+
+  // Optional chat word list (one entry per line, case-insensitive).
+  let blockRe = null;
+  if (blocklistFile) {
+    try {
+      const words = fs
+        .readFileSync(blocklistFile, 'utf8')
+        .split(/\r?\n/)
+        .map((w) => w.trim())
+        .filter((w) => w && !w.startsWith('#'));
+      if (words.length) blockRe = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'giu');
+      log(`chat blocklist: ${words.length} entries`);
+    } catch (err) {
+      log(`could not read blocklist ${blocklistFile}: ${err.message}`);
+    }
+  }
+  const filterChat = (text) => (blockRe ? text.replace(blockRe, (m) => '*'.repeat([...m].length)) : text);
+
+  // Admin API: HTTP on the gateway, answered by shard 0 over the link.
+  const adminPending = new Map();
+  let adminSeq = 0;
+  function adminRequest(op, args) {
+    return new Promise((resolve) => {
+      const id = ++adminSeq;
+      const timer = setTimeout(() => {
+        adminPending.delete(id);
+        resolve({ ok: false, error: 'control shard did not answer' });
+      }, 3000);
+      adminPending.set(id, { resolve, timer });
+      if (!shardLinks[0].send(JSON.stringify({ t: 'admin', id, op, args }))) {
+        clearTimeout(timer);
+        adminPending.delete(id);
+        resolve({ ok: false, error: 'control shard unreachable' });
+      }
+    });
+  }
+  const adminFails = new Map(); // ip -> { n, t }
+  function adminAuthorized(req, ip) {
+    const f = adminFails.get(ip);
+    if (f && f.n >= 10 && Date.now() - f.t < 60000) return false; // slow down guessing
+    const got = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const a = crypto.createHash('sha256').update(got).digest();
+    const b = crypto.createHash('sha256').update(adminToken).digest();
+    const ok = got.length > 0 && crypto.timingSafeEqual(a, b);
+    if (!ok) adminFails.set(ip, { n: (f && Date.now() - f.t < 60000 ? f.n : 0) + 1, t: Date.now() });
+    return ok;
+  }
+  const ADMIN_GET = new Set(['state', 'players']);
+  const ADMIN_POST = new Set(['ban', 'mute', 'kick', 'lift', 'move', 'balance']);
+  function handleAdminHttp(req, res, url) {
+    const json = (code, body) => {
+      res.statusCode = code;
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('cache-control', 'no-store');
+      res.end(JSON.stringify(body));
+    };
+    if (!adminToken) return json(404, { error: 'admin API disabled (set ADMIN_TOKEN)' });
+    if (!adminAuthorized(req, clientIp(req))) return json(401, { error: 'unauthorized' });
+    const op = url.pathname.slice('/admin/api/'.length);
+    if (req.method === 'GET' && ADMIN_GET.has(op)) {
+      adminRequest(op, { q: url.searchParams.get('q') || '' }).then((r) => json(r.ok ? 200 : 502, r.ok ? r.result : { error: r.error }));
+      return;
+    }
+    if (req.method === 'POST' && ADMIN_POST.has(op)) {
+      let body = '';
+      req.on('data', (d) => {
+        body += d;
+        if (body.length > 4096) req.destroy();
+      });
+      req.on('end', () => {
+        let args;
+        try {
+          args = body ? JSON.parse(body) : {};
+        } catch {
+          return json(400, { error: 'bad JSON' });
+        }
+        adminRequest(op, args).then((r) => json(r.ok ? 200 : 400, r.ok ? r.result : { error: r.error }));
+      });
+      return;
+    }
+    return json(404, { error: 'unknown admin endpoint' });
   }
 
   function onShardMessage(shard, data, isBinary) {
@@ -211,6 +324,16 @@ export async function startGateway(opts = {}) {
       const msg = JSON.parse(data.toString());
       if (msg.t === 'lb') lbByShard.set(shard, msg);
       else if (msg.t === 'map') applyMap(msg);
+      else if (msg.t === 'sanctions') applySanctions(msg.list);
+      else if (msg.t === 'kick') for (const pid of msg.pids || []) players.get(pid)?.ws.close(4001, 'kicked');
+      else if (msg.t === 'adminr') {
+        const p = adminPending.get(msg.id);
+        if (p) {
+          adminPending.delete(msg.id);
+          clearTimeout(p.timer);
+          p.resolve(msg);
+        }
+      }
       return;
     }
     if (data[0] === S_BATCH) unpackBatch(data, (m) => onShardBinary(m));
@@ -433,8 +556,12 @@ export async function startGateway(opts = {}) {
       const now = Date.now();
       if (now - c.lastChat < 1200) return;
       c.lastChat = now;
-      const text = cleanText(msg.text, 200);
+      const text = filterChat(cleanText(msg.text, 200));
       if (!text) return;
+      if (mutedPids.has(c.pid) && live(mutedPids.get(c.pid))) {
+        send(c, JSON.stringify({ t: 'notice', text: '你已被禁言，消息未发送。' }));
+        return;
+      }
       const [x, y] = c.cursor || (c.view ? [(c.view[0] + c.view[2]) / 2, (c.view[1] + c.view[3]) / 2] : [0, 0]);
       const cx = Math.max(0, Math.min(topo.width - 1, x));
       const cy = Math.max(0, Math.min(topo.height - 1, y));
@@ -444,6 +571,10 @@ export async function startGateway(opts = {}) {
 
   function onHello(c, msg) {
     let pid = readToken(msg.token);
+    if (pid && isBanned(pid, c.ipHash)) {
+      c.ws.close(4003, 'banned');
+      return;
+    }
     if (!pid || players.has(pid)) {
       // New identity (or the same token open twice: give the second tab its own id).
       do pid = crypto.randomInt(1, 2 ** 31);
@@ -503,6 +634,10 @@ export async function startGateway(opts = {}) {
       res.end('ok');
       return;
     }
+    if (url.pathname.startsWith('/admin/api/')) {
+      handleAdminHttp(req, res, url);
+      return;
+    }
     if (url.pathname === '/metrics') {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify(metrics()));
@@ -515,6 +650,7 @@ export async function startGateway(opts = {}) {
       rel = rel.slice('/shared'.length);
     }
     if (rel === '/') rel = '/index.html';
+    else if (rel === '/admin') rel = '/admin.html';
     const file = path.join(base, path.normalize(rel));
     if (!file.startsWith(base + path.sep)) {
       res.statusCode = 403;
@@ -552,6 +688,11 @@ export async function startGateway(opts = {}) {
       return;
     }
     const ip = clientIp(req);
+    if (isBanned(-1, ipHashOf(ip))) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     if ((perIp.get(ip) || 0) >= maxPerIp || clients.size >= maxClients) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
       socket.destroy();
@@ -583,6 +724,7 @@ export async function startGateway(opts = {}) {
     const c = {
       ws,
       ip,
+      ipHash: ipHashOf(ip),
       pid: 0,
       name: '',
       hue: 0,

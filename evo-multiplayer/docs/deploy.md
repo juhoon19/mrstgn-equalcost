@@ -106,11 +106,33 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `SNAPSHOT_EVERY` | 快照间隔（秒） | 30 |
 | `BALANCE` | 动态负载均衡（`false` 关闭，区块归属固定） | true |
 | `HOT_MS` / `BALANCE_RATIO` | 分片 tick 耗时超过多少毫秒算热 / 接收方须低于热分片的多少倍 | 30 / 0.7 |
+| `ADMIN_TOKEN` | 开启运维后台 `/admin` 和 `/admin/api/*`（不设则关闭）。用长随机串 | 空 |
+| `BLOCKLIST` | 聊天屏蔽词文件路径（每行一个，`#` 开头为注释，不区分大小写，替换为 `*`） | 空 |
 | `BOOT_WAIT` | 0 号分片冷启动时最多等其他分片报到多久（毫秒） | 6000 |
 | `SHARDS` / `GATEWAYS` / `WORLD` | `launch.js` 单机启动用 | 自动 / 自动 / 24x24 |
 
+## 运维后台与管理
+
+设置 `ADMIN_TOKEN` 后打开 `https://你的域名/admin`，输入口令即可：
+
+![运维后台](admin.png)
+
+- 集群概况、每个分片的负载、区块归属图（颜色 = 分片，亮度 = 实体数）；点击区块可以手动把它搬到别的分片；可以开关自动负载均衡。
+- 全服聊天记录（所有分片汇总到 0 号分片，保留最近 500 条），每条都能直接禁言、踢出、封禁。
+- 按名字或 pid 查找玩家。
+- 生效中的处罚列表，可解除。处罚保存在 0 号分片的 `DATA_DIR/bans.json`，重启不丢，到期自动解除。
+
+处罚的执行：
+- **禁言**：该玩家的聊天不再发出，他会收到提示。
+- **踢出**：断开连接（关闭码 4001），客户端 10 秒后自动重连。
+- **封禁**：断开连接（4003），该身份再也连不上；客户端显示“已被封禁”，不再重连。默认**只封身份**。玩家换个新的匿名身份仍能进，这是匿名游戏的固有限制，要彻底防需要账号体系。
+- **封禁 + IP**：连同 IP 一起封，该地址的新连接在握手阶段就被拒绝。慎用：手机网络（运营商级 NAT）、学校、公司的一个 IP 后面可能有很多人。IP 只以带密钥的哈希形式离开网关。
+
+API（都需要 `Authorization: Bearer <ADMIN_TOKEN>`）：`GET /admin/api/state`、`GET /admin/api/players?q=`，以及 `POST /admin/api/{mute,kick,ban,lift,move,balance}`，POST 的参数用 JSON 传，如 `{"pid":123,"minutes":60,"reason":"刷屏","withIp":false}`、`{"id":3}`、`{"chunk":40,"to":2}`、`{"on":false}`。同一 IP 一分钟内口令错 10 次会被暂时拒绝。
+
 ## 上线安全清单
 
+- [ ] 设置 `ADMIN_TOKEN`（长随机串），上线后第一时间确认 `/admin` 能用。
 - [ ] 设置随机的 `CLUSTER_SECRET`、`TOKEN_SECRET`，并固定 `TOKEN_SECRET`（`launch.js` 未指定时会自动生成并存在 `data/secrets.json`）。
 - [ ] 备份 `DATA_DIR`（Docker 里是每个分片的 `shardN_data` 卷）：那就是整个世界。
 - [ ] 分片端口只在内网；防火墙只开 80/443。

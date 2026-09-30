@@ -53,7 +53,8 @@ npm start                     # 默认：CPU 数自动决定分片/网关数量�
 3. **“最新者为准”的客户端合并**：区块流之间没有全局顺序（跨分片交接、网关回放缓存），客户端用分片时钟判断谁的信息更新，保证不会丢实体或重影——端到端测试逐个实体对比服务器真值。
 4. **热点自动分流**：所有人挤到一个角落时，协调者把过载分片的边界区块实时搬给空闲的邻居（带确认、可重发、不重复），网关和客户端无缝跟随。实测热点从 35ms/tick 降到约 18ms，81 次搬迁 0 失步。
 5. **世界不会因为重启而消失**：分片定期快照 + 停止时写最终快照，启动自动恢复；玩家身份密钥也持久化，谱系归属跨重启保留。分片崩溃会被自动拉起，玩家不掉线。
-6. **一切可测**：`npm test` 会启动真实的 4 分片 + 网关，连真实客户端，冻结模拟后逐个核对实体位置。
+6. **运维后台 + 管理工具**：`/admin`（设置 `ADMIN_TOKEN` 开启）可以看集群负载、区块归属图、全服聊天，一键禁言、踢出、封禁（可选连 IP）、解除，支持聊天屏蔽词。处罚在所有网关同时生效，重启不丢。
+7. **一切可测**：`npm test` 会启动真实的 4 分片 + 网关，连真实客户端，冻结模拟后逐个核对实体位置。
 
 ## 实测（单台 4 核容器，分片/网关/压测机器人都挤在同一台）
 
@@ -78,9 +79,10 @@ src/shared/     浏览器和服务器共用：二进制编解码、协议、拓�
 src/server/     shard-node.js 分片 · gateway-node.js 网关 · region.js 区块/幽灵/迁移
                 coordinator.js 区块归属与负载均衡（运行在 0 号分片）
                 snapshot.js 快照编码 · link.js 内部连接 · game-loader.js
-src/game/       soup.js 演示游戏（替换成你的）
+                control.js 控制面：玩家名录、聊天记录、禁言/封禁（运行在 0 号分片）
+src/game/       soup.js 演示游戏（替换成你的） · template.js 最小模板
 src/launch.js   单机一键启动（多进程）
-public/         浏览器客户端（Canvas 2D，支持触屏）
+public/         浏览器客户端（Canvas 2D，支持触屏）· admin.html 运维后台
 bench/          bots.js 压测机器人（同时校验协议一致性）· headless.js 无网络模拟调参
 test/           单元测试 + 端到端真值对比
 deploy/         docker-compose.yml · Caddyfile · fly.toml
@@ -91,7 +93,7 @@ docs/           架构、协议、接入指南、部署、参考、压测
 ## 常用命令
 
 ```bash
-npm test                                             # 28 个测试，含真实网络端到端、实时搬区块、整集群重启
+npm test                                             # 33 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁
 node bench/headless.js --shards 4 --world 16x16      # 不开网络，看生态/性能
 node bench/bots.js --url ws://localhost:8080/ws --n 500 --duration 60   # 压测
 curl localhost:8080/metrics                          # 网关指标
