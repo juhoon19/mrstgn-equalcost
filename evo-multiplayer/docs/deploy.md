@@ -93,7 +93,8 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `SHARD_ID` | 分片编号 | 0 |
 | `MAX_PER_IP` | 单 IP 最大连接数 | 16 |
 | `MAX_CLIENTS` | 单网关最大连接数 | 20000 |
-| `MAX_CHUNKS` | 视野超过多少区块切到概览 LOD | 30 |
+| `MAX_CHUNKS` / `MAX_CHUNKS_LO` | 高档 / 低档视野最多区块数，超过切到概览 | 30 / 80 |
+| `LO_EVERY` | 低档每几个网络帧发一次 | 4（2.5 Hz） |
 | `TRUST_PROXY` | 信任 `X-Forwarded-For`（在反代/隧道后面必须开） | false |
 | `ALLOWED_ORIGINS` | 允许的网页来源（逗号分隔，空 = 不限） | 空 |
 | `TICK_HZ` / `NET_EVERY` / `KEY_EVERY` | 模拟频率 / 每几 tick 发一帧 / 每几帧一个关键帧 | 20 / 2 / 30 |
