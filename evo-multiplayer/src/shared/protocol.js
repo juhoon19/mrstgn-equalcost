@@ -28,6 +28,12 @@ export const I_GHOST = 111;
 
 // Chunk frame flags
 export const F_KEY = 1;
+export const F_LO = 2; // frame belongs to the low-rate stream of the chunk
+
+// Quality tiers a client can watch a chunk at. Each tier is its own
+// keyframe/delta stream, encoded once per chunk for all its watchers.
+export const TIER_HI = 0; // every network tick (10 Hz)
+export const TIER_LO = 1; // every 4th network tick (2.5 Hz), for zoomed-out views
 
 // Event kinds inside S_EVENTS
 export const EV_CHAT = 1;
@@ -53,8 +59,8 @@ export const ACTION_COOLDOWN_MS = {
 // ---------------------------------------------------------------------------
 // Client -> server encoders (used by the browser and by bots)
 
-export function encodeView(x0, y0, x1, y1) {
-  return new Writer(17).u8(C_VIEW).f32(x0).f32(y0).f32(x1).f32(y1).finish();
+export function encodeView(x0, y0, x1, y1, tier = TIER_HI) {
+  return new Writer(18).u8(C_VIEW).f32(x0).f32(y0).f32(x1).f32(y1).u8(tier).finish();
 }
 
 export function encodeAction(type, x, y, dx = 0, dy = 0) {
@@ -207,6 +213,7 @@ export class ClientWorld {
     const flags = r.u8();
     const T = r.u32();
     this.stats.frames++;
+    this.interval = flags & F_LO ? ClientWorld.loInterval : ClientEntity.interval;
     let c = this.chunks.get(chunkId);
 
     if (flags & F_KEY) {
@@ -307,6 +314,7 @@ export class ClientWorld {
     }
     e.chunk = chunkId;
     e.srvT = T;
+    e.interval = this.interval;
     e.kind = rec.kind;
     e.x = x;
     e.y = y;
@@ -372,6 +380,7 @@ export class ClientEntity {
     this.py = 0;
     this.t = 0;
     this.srvT = 0;
+    this.interval = ClientEntity.interval;
     this.r = 1;
     this.rgb = 0xffffff;
     this.owner = 0;
@@ -379,7 +388,7 @@ export class ClientEntity {
   }
 
   alpha(now) {
-    const a = (now - this.t) / ClientEntity.interval;
+    const a = (now - this.t) / this.interval;
     return a < 0 ? 0 : a > 1 ? 1 : a;
   }
 
@@ -394,6 +403,7 @@ export class ClientEntity {
   }
 }
 ClientEntity.interval = 100;
+ClientWorld.loInterval = 400;
 
 export function decodeEvents(bytes, world, posQuant) {
   const r = new Reader(bytes);

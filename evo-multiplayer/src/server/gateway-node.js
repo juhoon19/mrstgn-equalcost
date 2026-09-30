@@ -41,6 +41,7 @@ import {
   I_SUMMARY,
   S_BATCH,
   F_KEY,
+  F_LO,
   packBatch,
   unpackBatch,
   ACTION_COOLDOWN_MS,
@@ -78,6 +79,7 @@ export async function startGateway(opts = {}) {
   const secret = opts.secret ?? cfg.secret;
   const tokenSecret = opts.tokenSecret ?? cfg.get('token-secret', 'TOKEN_SECRET', secret + ':tokens');
   const maxChunks = Number(opts.maxChunks ?? cfg.get('max-chunks', 'MAX_CHUNKS', 30));
+  const maxChunksLo = Number(opts.maxChunksLo ?? cfg.get('max-chunks-lo', 'MAX_CHUNKS_LO', 80));
   const viewMargin = Number(opts.viewMargin ?? cfg.get('view-margin', 'VIEW_MARGIN', 96));
   const maxPerIp = Number(opts.maxPerIp ?? cfg.get('max-per-ip', 'MAX_PER_IP', 16));
   const maxClients = Number(opts.maxClients ?? cfg.get('max-clients', 'MAX_CLIENTS', 20000));
@@ -130,7 +132,10 @@ export async function startGateway(opts = {}) {
     nutrient: new Uint8Array(topo.chunkCount),
   };
 
-  const chunkState = new Map(); // chunkId -> { clients: Set, cache: Buffer[], unsubAt }
+  // Streams are keyed by k = chunkId * 2 + tier (tier 0 = 10 Hz, 1 = 2.5 Hz).
+  // A client watches each chunk at exactly one tier.
+  const chunkState = new Map(); // k -> { clients: Set, cache: Buffer[], unsubAt }
+  const skey = (id, tier) => id * 2 + tier;
   const clients = new Set();
   const players = new Map(); // pid -> client (this gateway only)
   const perIp = new Map();
@@ -144,14 +149,17 @@ export async function startGateway(opts = {}) {
         log,
         onOpen: () => {
           // Re-establish everything the shard forgot (it may have restarted).
-          const subs = [];
-          for (const [id, st] of chunkState) {
+          const subs = [[], []];
+          for (const [k, st] of chunkState) {
+            const id = k >> 1;
             if (topo.ownerOf(id) !== i) continue;
-            subs.push(id);
+            subs[k & 1].push(id);
             st.cache = [];
-            for (const c of st.clients) c.chunks.set(id, 0);
+            for (const c of st.clients) c.chunks.set(k, 0);
           }
-          if (subs.length) link.send(JSON.stringify({ t: 'sub', c: subs }));
+          for (const tier of [0, 1]) {
+            if (subs[tier].length) link.send(JSON.stringify({ t: 'sub', c: subs[tier], tier }));
+          }
           const ps = [...players.values()].map(playerRecord);
           for (let k = 0; k < ps.length; k += 2000) link.send(JSON.stringify({ t: 'player', p: ps.slice(k, k + 2000) }));
         },
@@ -180,22 +188,26 @@ export async function startGateway(opts = {}) {
     if (type === S_CHUNK) {
       counters.framesIn++;
       const h = peekChunkHeader(data);
-      const st = chunkState.get(h.chunkId);
+      const k = skey(h.chunkId, h.flags & F_LO ? 1 : 0);
+      const st = chunkState.get(k);
       if (!st) return;
       if (h.flags & F_KEY) st.cache = [data];
       else if (st.cache.length > 0) {
         st.cache.push(data);
         if (st.cache.length > 120) st.cache = [];
       }
-      for (const c of st.clients) deliverChunk(c, h.chunkId, st, data);
+      for (const c of st.clients) deliverChunk(c, k, st, data);
     } else if (type === S_FIELD || type === S_EVENTS) {
       const r = new Reader(data);
       r.u8();
-      const st = chunkState.get(r.varint());
-      if (!st) return;
-      for (const c of st.clients) {
-        if (backlog(c) < highWater) send(c, data);
-        else counters.dropped++;
+      const id = r.varint();
+      for (const tier of [0, 1]) {
+        const st = chunkState.get(skey(id, tier));
+        if (!st) continue;
+        for (const c of st.clients) {
+          if (backlog(c) < highWater) send(c, data);
+          else counters.dropped++;
+        }
       }
     } else if (type === I_SUMMARY) {
       const r = new Reader(data);
@@ -259,12 +271,12 @@ export async function startGateway(opts = {}) {
   // keyframe chain. Deltas are only valid on top of everything before them,
   // so a frame is never dropped for an in-sync client: it is either sent or
   // the client is marked out of sync and later caught up from the cache.
-  function deliverChunk(c, chunkId, st, data) {
-    const state = c.chunks.get(chunkId);
+  function deliverChunk(c, k, st, data) {
+    const state = c.chunks.get(k);
     const congested = backlog(c) > highWater;
     if (state === 1) {
       if (congested) {
-        c.chunks.set(chunkId, 0);
+        c.chunks.set(k, 0);
         counters.dropped++;
         return;
       }
@@ -273,31 +285,32 @@ export async function startGateway(opts = {}) {
     }
     if (congested || st.cache.length === 0) return;
     for (const f of st.cache) send(c, f);
-    c.chunks.set(chunkId, 1);
+    c.chunks.set(k, 1);
     counters.resyncs++;
   }
 
-  function subscribe(c, id) {
-    let st = chunkState.get(id);
+  // c.chunks maps stream key -> sync state; pendingSub/Unsub hold stream keys.
+  function subscribe(c, k) {
+    let st = chunkState.get(k);
     if (!st) {
       st = { clients: new Set(), cache: [], unsubAt: 0 };
-      chunkState.set(id, st);
-      const owner = topo.ownerOf(id);
-      pendingUnsub[owner].delete(id);
-      pendingSub[owner].add(id);
+      chunkState.set(k, st);
+      const owner = topo.ownerOf(k >> 1);
+      pendingUnsub[owner].delete(k);
+      pendingSub[owner].add(k);
     }
     st.unsubAt = 0;
     st.clients.add(c);
-    c.chunks.set(id, 0);
+    c.chunks.set(k, 0);
     if (st.cache.length > 0 && backlog(c) < highWater) {
       for (const f of st.cache) send(c, f);
-      c.chunks.set(id, 1);
+      c.chunks.set(k, 1);
     }
   }
 
-  function unsubscribe(c, id) {
-    const st = chunkState.get(id);
-    c.chunks.delete(id);
+  function unsubscribe(c, k) {
+    const st = chunkState.get(k);
+    c.chunks.delete(k);
     if (!st) return;
     st.clients.delete(c);
     // Keep the shard subscription warm for a few seconds: players pan back
@@ -312,17 +325,18 @@ export async function startGateway(opts = {}) {
     const type = r.u8();
     const now = Date.now();
     if (type === C_VIEW) {
-      if (buf.length !== 17) return;
+      if (buf.length !== 17 && buf.length !== 18) return;
       const x0 = r.f32();
       const y0 = r.f32();
       const x1 = r.f32();
       const y1 = r.f32();
+      const tier = buf.length === 18 && r.u8() === 1 ? 1 : 0;
       if (![x0, y0, x1, y1].every(Number.isFinite)) return;
       c.view = [x0, y0, x1, y1];
-      const want = topo.viewChunks(x0, y0, x1, y1, viewMargin, maxChunks);
-      const wantSet = new Set(want || []);
-      for (const id of [...c.chunks.keys()]) if (!wantSet.has(id)) unsubscribe(c, id);
-      for (const id of wantSet) if (!c.chunks.has(id)) subscribe(c, id);
+      const want = topo.viewChunks(x0, y0, x1, y1, viewMargin, tier ? maxChunksLo : maxChunks);
+      const wantSet = new Set((want || []).map((id) => skey(id, tier)));
+      for (const k of [...c.chunks.keys()]) if (!wantSet.has(k)) unsubscribe(c, k);
+      for (const k of wantSet) if (!c.chunks.has(k)) subscribe(c, k);
       return;
     }
     if (type === C_ACTION) {
@@ -337,7 +351,8 @@ export async function startGateway(opts = {}) {
       if (now - last < cd * 0.9) return;
       c.cooldowns.set(a.type, now);
       // Must be somewhere the player can see: no remote griefing of far chunks.
-      if (!c.chunks.has(topo.chunkAt(a.x, a.y))) return;
+      const at = topo.chunkAt(a.x, a.y);
+      if (!c.chunks.has(skey(at, 0)) && !c.chunks.has(skey(at, 1))) return;
       actionBatch[topo.ownerAt(a.x, a.y)].push({ pid: c.pid, ...a });
       counters.actions++;
       return;
@@ -401,6 +416,7 @@ export async function startGateway(opts = {}) {
         posQuant: POS_QUANT,
         netHz,
         maxChunks,
+        maxChunksLo,
         viewMargin,
         cooldowns: ACTION_COOLDOWN_MS,
         gateway: gwId,
@@ -554,13 +570,15 @@ export async function startGateway(opts = {}) {
     for (let s = 0; s < shardLinks.length; s++) {
       const link = shardLinks[s];
       if (!link.open) continue;
-      if (pendingSub[s].size) {
-        link.send(JSON.stringify({ t: 'sub', c: [...pendingSub[s]] }));
-        pendingSub[s].clear();
-      }
-      if (pendingUnsub[s].size) {
-        link.send(JSON.stringify({ t: 'unsub', c: [...pendingUnsub[s]] }));
-        pendingUnsub[s].clear();
+      for (const [t, pending] of [
+        ['sub', pendingSub[s]],
+        ['unsub', pendingUnsub[s]],
+      ]) {
+        if (!pending.size) continue;
+        const byTier = [[], []];
+        for (const k of pending) byTier[k & 1].push(k >> 1);
+        for (const tier of [0, 1]) if (byTier[tier].length) link.send(JSON.stringify({ t, c: byTier[tier], tier }));
+        pending.clear();
       }
       if (actionBatch[s].length) {
         const list = actionBatch[s];
@@ -584,10 +602,10 @@ export async function startGateway(opts = {}) {
   let rates = {};
   const secondTimer = setInterval(() => {
     const now = Date.now();
-    for (const [id, st] of chunkState) {
+    for (const [k, st] of chunkState) {
       if (st.clients.size === 0 && st.unsubAt && now > st.unsubAt) {
-        chunkState.delete(id);
-        pendingUnsub[topo.ownerOf(id)].add(id);
+        chunkState.delete(k);
+        pendingUnsub[topo.ownerOf(k >> 1)].add(k);
       }
     }
     if (shardLinks[0].open) shardLinks[0].send(JSON.stringify({ t: 'online', gw: gwId, n: players.size }));

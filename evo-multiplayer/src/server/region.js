@@ -36,6 +36,16 @@ export class Entity {
   }
 }
 
+export class Stream {
+  constructor(tier) {
+    this.tier = tier;
+    this.subscribers = new Set();
+    this.frameNo = 0;
+    this.forceKey = true;
+    this.lastSent = new Map();
+  }
+}
+
 export class Chunk {
   constructor(id, cx, cy, fieldSize) {
     this.id = id;
@@ -46,10 +56,10 @@ export class Chunk {
     this.fieldNext = new Float32Array(fieldSize);
     // Networking state lives here so it moves with the chunk if ownership
     // ever changes: which gateways watch it and what they were last told.
+    // One stream per quality tier (0 = 10 Hz, 1 = 2.5 Hz); `subscribers` is
+    // the union, used for fields and events.
+    this.streams = [new Stream(0), new Stream(1)];
     this.subscribers = new Set();
-    this.frameNo = 0;
-    this.forceKey = true;
-    this.lastSent = new Map();
     this.cursors = new Map(); // playerId -> { x, y, t }
     this.events = [];
   }

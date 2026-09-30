@@ -15,6 +15,8 @@ import {
   EV_CHAT,
   EV_ACTION,
   ACTIONS,
+  TIER_HI,
+  TIER_LO,
   encodeView,
   encodeCursor,
   encodeAction,
@@ -287,6 +289,16 @@ function toWorld(sx, sy) {
   return [cam.x + (sx - W / 2) / cam.zoom, cam.y + (sy - H / 2) / cam.zoom];
 }
 
+// Zoomed out, organisms are a few pixels wide: watch the 2.5 Hz stream,
+// which costs about a third of the bandwidth and allows a wider view.
+const LO_ZOOM = 0.9;
+function viewTier() {
+  return cam.zoom < LO_ZOOM && welcome.maxChunksLo ? TIER_LO : TIER_HI;
+}
+function viewMaxChunks() {
+  return viewTier() === TIER_LO ? welcome.maxChunksLo : welcome.maxChunks;
+}
+
 function maybeSendView(now) {
   if (!connected || !topo) return;
   if (!viewDirty && now - lastViewSent < 1000) return;
@@ -294,9 +306,9 @@ function maybeSendView(now) {
   viewDirty = false;
   lastViewSent = now;
   const [x0, y0, x1, y1] = viewRect();
-  send(encodeView(x0, y0, x1, y1));
+  send(encodeView(x0, y0, x1, y1, viewTier()));
   // Mirror the gateway's interest set and forget chunks that left it.
-  const want = new Set(topo.viewChunks(x0, y0, x1, y1, welcome.viewMargin, welcome.maxChunks) || []);
+  const want = new Set(topo.viewChunks(x0, y0, x1, y1, welcome.viewMargin, viewMaxChunks()) || []);
   for (const id of [...world.chunks.keys()]) if (!want.has(id)) world.dropChunk(id);
   for (const id of [...world.fields.keys()]) if (!want.has(id)) world.fields.delete(id);
   for (const id of [...cursors.keys()]) if (!want.has(id)) cursors.delete(id);
@@ -577,7 +589,7 @@ function render(now) {
   ctx.setTransform(dpr * cam.zoom, 0, 0, dpr * cam.zoom, dpr * (W / 2 - cam.x * cam.zoom), dpr * (H / 2 - cam.y * cam.zoom));
   const S = welcome.world.chunkSize;
   const [x0, y0, x1, y1] = viewRect();
-  const detailed = topo.viewChunks(x0, y0, x1, y1, welcome.viewMargin, welcome.maxChunks);
+  const detailed = topo.viewChunks(x0, y0, x1, y1, welcome.viewMargin, viewMaxChunks());
 
   // World background + LOD.
   ctx.fillStyle = '#0b1118';

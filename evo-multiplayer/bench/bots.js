@@ -41,6 +41,7 @@ const decodeFrac = Number(arg('decode', 0.2));
 const viewW = Number(arg('view-w', 900));
 const viewH = Number(arg('view-h', 520));
 const quietBots = arg('quiet', 'false') === 'true';
+const loFrac = Number(arg('lo', 0)); // share of bots on the 2.5 Hz tier
 
 const totals = {
   connected: 0,
@@ -64,6 +65,7 @@ class Bot {
   constructor(i) {
     this.i = i;
     this.decode = Math.random() < decodeFrac;
+    this.tier = Math.random() < loFrac ? 1 : 0; // fraction of zoomed-out watchers
     this.ws = new WebSocket(url, { perMessageDeflate: false });
     this.ws.binaryType = 'nodebuffer';
     this.ws.on('open', () => {
@@ -159,7 +161,7 @@ class Bot {
   }
 
   sendView() {
-    this.send(encodeView(this.x, this.y, this.x + viewW, this.y + viewH));
+    this.send(encodeView(this.x, this.y, this.x + viewW, this.y + viewH, this.tier));
   }
 
   send(buf) {

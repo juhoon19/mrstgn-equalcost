@@ -10,7 +10,7 @@
 // `keyEvery` frames) plus the cached deltas since it.
 
 import { Writer } from '../shared/codec.js';
-import { S_CHUNK, S_FIELD, S_EVENTS, F_KEY, EV_CHAT, EV_ACTION, MOVE_R, MOVE_LEVEL, writeFullRecord, writeMoveRecord } from '../shared/protocol.js';
+import { S_CHUNK, S_FIELD, S_EVENTS, F_KEY, F_LO, EV_CHAT, EV_ACTION, MOVE_R, MOVE_LEVEL, writeFullRecord, writeMoveRecord } from '../shared/protocol.js';
 import { POS_QUANT } from '../shared/topology.js';
 
 const writer = new Writer(64 * 1024);
@@ -40,16 +40,17 @@ function lvl(e) {
 
 const byId = (a, b) => a.id - b.id;
 
-export function encodeChunkFrame(chunk, chunkSize, key) {
+export function encodeChunkFrame(chunk, chunkSize, key, stream = chunk.streams[0]) {
   const ox = chunk.cx * chunkSize;
   const oy = chunk.cy * chunkSize;
   const qmax = Math.min(65535, chunkSize * POS_QUANT);
-  const frameNo = ++chunk.frameNo;
+  const frameNo = ++stream.frameNo;
   const w = writer.reset();
   // Shard wall clock (ms, u32). Clients use it to decide which chunk has the
   // newest word on an entity; keep shard clocks NTP-synced across machines.
-  w.u8(S_CHUNK).varint(chunk.id).varint(frameNo).u8(key ? F_KEY : 0).u32(Date.now() % 4294967296);
-  const last = chunk.lastSent;
+  const flags = (key ? F_KEY : 0) | (stream.tier ? F_LO : 0);
+  w.u8(S_CHUNK).varint(chunk.id).varint(frameNo).u8(flags).u32(Date.now() % 4294967296);
+  const last = stream.lastSent;
   const ents = chunk.entities;
 
   if (key) {

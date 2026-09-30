@@ -8,7 +8,7 @@ import { startShard } from '../src/server/shard-node.js';
 import { startGateway } from '../src/server/gateway-node.js';
 import { loadGame } from '../src/server/game-loader.js';
 import { POS_QUANT } from '../src/shared/topology.js';
-import { ClientWorld, S_CHUNK, S_EVENTS, ACTIONS, encodeView, encodeAction, encodeCursor, decodeEvents, unpackBatch } from '../src/shared/protocol.js';
+import { ClientWorld, S_CHUNK, S_EVENTS, ACTIONS, encodeView, encodeAction, encodeCursor, decodeEvents, unpackBatch, TIER_HI, TIER_LO } from '../src/shared/protocol.js';
 
 const base = 20000 + Math.floor(Math.random() * 20000);
 const topology = {
@@ -24,7 +24,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 before(async () => {
   const game = await loadGame('soup');
   shards = await Promise.all(
-    [0, 1, 2, 3].map((i) => startShard({ shard: i, port: base + i, topology, secret, game, netEvery: 1, quiet: true, seed: 5 })),
+    [0, 1, 2, 3].map((i) => startShard({ shard: i, port: base + i, topology, secret, game, netEvery: 1, loEvery: 1, quiet: true, seed: 5 })),
   );
   gateway = await startGateway({ port: 0, host: '127.0.0.1', topology, secret, maxChunks: 100, quiet: true, maxPerIp: 4 });
   await sleep(500);
@@ -67,28 +67,35 @@ async function until(fn, ms = 5000) {
   return false;
 }
 
-test('client replica matches the authoritative state exactly', async () => {
-  const c = client();
-  assert.ok(await until(() => c.welcome));
+// loEvery is 1 here so the low-rate tier also ends exactly on the paused
+// tick; its separate stream state, flags and gateway keys are still exercised.
+test('client replicas (both quality tiers) match the authoritative state exactly', async () => {
+  const hi = client();
+  const lo = client();
+  assert.ok(await until(() => hi.welcome && lo.welcome));
   const W = 6 * 256;
-  c.ws.send(encodeView(0, 0, W, W));
+  hi.ws.send(encodeView(0, 0, W, W, TIER_HI));
+  lo.ws.send(encodeView(0, 0, W, W, TIER_LO));
   await sleep(3000); // let entities move, migrate across the shard seam, be born and die
   for (const s of shards) s.pause();
   await sleep(400); // drain in-flight frames
   const truth = new Map();
   for (const s of shards) for (const ch of s.region.chunks.values()) for (const e of ch.entities) truth.set(e.id, e);
   assert.ok(truth.size > 100);
-  assert.equal(c.world.entities.size, truth.size, 'entity count differs');
-  for (const [id, e] of truth) {
-    const got = c.world.entities.get(id);
-    assert.ok(got, `client is missing entity ${id}`);
-    assert.ok(Math.abs(got.x - e.x) <= 0.5 / POS_QUANT + 1e-6, `x of ${id}: ${got.x} vs ${e.x}`);
-    assert.ok(Math.abs(got.y - e.y) <= 0.5 / POS_QUANT + 1e-6, `y of ${id}: ${got.y} vs ${e.y}`);
-    assert.equal(got.kind, e.kind);
+  for (const c of [hi, lo]) {
+    assert.equal(c.world.entities.size, truth.size, 'entity count differs');
+    for (const [id, e] of truth) {
+      const got = c.world.entities.get(id);
+      assert.ok(got, `client is missing entity ${id}`);
+      assert.ok(Math.abs(got.x - e.x) <= 0.5 / POS_QUANT + 1e-6, `x of ${id}: ${got.x} vs ${e.x}`);
+      assert.ok(Math.abs(got.y - e.y) <= 0.5 / POS_QUANT + 1e-6, `y of ${id}: ${got.y} vs ${e.y}`);
+      assert.equal(got.kind, e.kind);
+    }
+    assert.equal(c.world.stats.unknownIds, 0);
+    c.ws.close();
   }
-  assert.equal(c.world.stats.unknownIds, 0);
+  assert.ok(lo.world.interval > hi.world.interval, 'low tier frames are flagged');
   for (const s of shards) s.resume();
-  c.ws.close();
 });
 
 test('seeding creates organisms owned by the player; others see the effect and cursor', async () => {

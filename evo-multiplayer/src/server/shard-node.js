@@ -28,6 +28,8 @@ export async function startShard(opts = {}) {
   const tickHz = Number(opts.tickHz ?? cfg.get('tick-hz', 'TICK_HZ', 20));
   const netEvery = Number(opts.netEvery ?? cfg.get('net-every', 'NET_EVERY', 2));
   const keyEvery = Number(opts.keyEvery ?? cfg.get('key-every', 'KEY_EVERY', 30));
+  const loEvery = Number(opts.loEvery ?? cfg.get('lo-every', 'LO_EVERY', 4));
+  const loKeyEvery = Math.max(4, Math.round(keyEvery / loEvery)); // similar wall-clock key spacing
   const fieldEvery = Number(opts.fieldEvery ?? cfg.get('field-every', 'FIELD_EVERY', 20));
   const fieldNetRes = Number(opts.fieldNetRes ?? cfg.get('field-net-res', 'FIELD_NET_RES', 8));
   const summaryEvery = Number(opts.summaryEvery ?? cfg.get('summary-every', 'SUMMARY_EVERY', 20));
@@ -128,26 +130,40 @@ export async function startShard(opts = {}) {
     }
   }
 
+  function refreshUnion(chunk) {
+    chunk.subscribers.clear();
+    for (const st of chunk.streams) for (const ws of st.subscribers) chunk.subscribers.add(ws);
+  }
+
+  function unsub(chunk, tier, ws) {
+    const st = chunk.streams[tier];
+    if (st.subscribers.delete(ws) && st.subscribers.size === 0) st.lastSent.clear();
+    refreshUnion(chunk);
+  }
+
   function unsubscribeAll(ws) {
     for (const chunk of region.chunks.values()) {
-      if (chunk.subscribers.delete(ws) && chunk.subscribers.size === 0) chunk.lastSent.clear();
+      if (!chunk.subscribers.has(ws)) continue;
+      for (const st of chunk.streams) unsub(chunk, st.tier, ws);
     }
   }
 
   function handleGatewayJson(ws, msg) {
+    const tier = msg.tier === 1 ? 1 : 0;
     switch (msg.t) {
       case 'sub':
         for (const id of msg.c || []) {
           const chunk = region.chunks.get(id);
           if (!chunk) continue;
+          chunk.streams[tier].subscribers.add(ws);
+          chunk.streams[tier].forceKey = true;
           chunk.subscribers.add(ws);
-          chunk.forceKey = true;
         }
         break;
       case 'unsub':
         for (const id of msg.c || []) {
           const chunk = region.chunks.get(id);
-          if (chunk && chunk.subscribers.delete(ws) && chunk.subscribers.size === 0) chunk.lastSent.clear();
+          if (chunk) unsub(chunk, tier, ws);
         }
         break;
       case 'player':
@@ -251,6 +267,7 @@ export async function startShard(opts = {}) {
           entities: region.entityCount(),
           chunks: region.chunks.size,
           watchedChunks: [...region.chunks.values()].filter((c) => c.subscribers.size > 0).length,
+          watchedLo: [...region.chunks.values()].filter((c) => c.streams[1].subscribers.size > 0).length,
           gateways: gateways.size,
           peers: [...peerLinks].map(([id, l]) => ({ id, open: l.open })),
           migratedIn,
@@ -354,10 +371,17 @@ export async function startShard(opts = {}) {
           chunk.events.length = 0;
           continue;
         }
-        const key = chunk.forceKey || chunk.frameNo % keyEvery === 0;
-        chunk.forceKey = false;
-        const frame = encodeChunkFrame(chunk, chunkSize, key);
-        for (const ws of chunk.subscribers) sendGw(ws, frame);
+        const netTick = region.tick / netEvery;
+        for (const st of chunk.streams) {
+          if (st.subscribers.size === 0) continue;
+          // The low tier runs at 1/loEvery of the rate; its deltas simply
+          // span loEvery ticks' worth of movement.
+          if (st.tier === 1 && netTick % loEvery !== 0 && !st.forceKey) continue;
+          const key = st.forceKey || st.frameNo % (st.tier === 1 ? loKeyEvery : keyEvery) === 0;
+          st.forceKey = false;
+          const frame = encodeChunkFrame(chunk, chunkSize, key, st);
+          for (const ws of st.subscribers) sendGw(ws, frame);
+        }
         const ev = encodeEvents(chunk, chunkSize, region.players, now, (region.tick / netEvery) % 2 === 0);
         if (ev) for (const ws of chunk.subscribers) sendGw(ws, ev);
       }
