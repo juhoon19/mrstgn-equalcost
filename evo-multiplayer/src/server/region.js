@@ -427,8 +427,9 @@ export class Region {
           pad[i + 1] = this.haloValue(north, i, G - 1, i, ch, f, i, 0);
           pad[(G + 1) * P + i + 1] = this.haloValue(south, i, 0, i, ch, f, i, G - 1);
         }
-        const k = (dt * diff[ch]) / h2;
-        const d = 1 - dt * decay[ch];
+        // A game may use fewer channels than the world has: extra ones stay inert.
+        const k = (dt * (diff[ch] || 0)) / h2;
+        const d = 1 - dt * (decay[ch] || 0);
         for (let y = 0; y < G; y++) {
           const row = (y + 1) * P + 1;
           for (let x = 0; x < G; x++) {

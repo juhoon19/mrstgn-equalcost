@@ -2,6 +2,8 @@
 
 网络层（分片、网关、快照、客户端副本）对游戏内容一无所知。服务器端所有游戏逻辑在一个模块里，默认是 `src/game/soup.js`。写一个同样导出这些东西的文件，启动时 `GAME=你的文件路径` 或 `--game ./path/to/mygame.js` 即可。
 
+**从模板开始**：`src/game/template.js` 是一个 100 行左右、注释齐全的最小游戏（粒子在热场里漂移、玩家可以放粒子/加热/推动），覆盖了所有钩子。复制它改名开始写，`node src/launch.js --game template` 可以直接跑。`test/games.test.js` 会对 `src/game/` 下列出的每个游戏跑一遍跨分片迁移和快照往返测试，把你的游戏名加进去即可。
+
 ## 必须导出
 
 ```js
@@ -75,4 +77,4 @@ node --test test/*.test.js                                      # 包含一条�
 
 ## 世界参数
 
-`TOPOLOGY` 里的 `world` 可改：`chunksX, chunksY`（区块数）、`chunkSize`（≤ 8191）、`fieldRes`（每区块场网格，需能被 `FIELD_NET_RES` 整除）、`channels`（化学通道数，客户端着色用前 3 个）。
+`TOPOLOGY` 里的 `world` 可改：`chunksX, chunksY`（区块数）、`chunkSize`（≤ 8191）、`fieldRes`（每区块场网格，需能被 `FIELD_NET_RES` 整除）、`channels`（化学通道数，默认 3，客户端着色用前 3 个；游戏的 `fieldDiffusion` 比它短时，多出的通道保持为 0）。
