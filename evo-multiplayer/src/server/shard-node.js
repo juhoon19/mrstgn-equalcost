@@ -356,10 +356,11 @@ export async function startShard(opts = {}) {
     }
   }
 
+  let paused = false;
   function loop() {
     if (stopped) return;
     try {
-      tick();
+      if (!paused) tick();
     } catch (err) {
       console.error(`[shard ${shardId}] tick failed`, err);
     }
@@ -374,6 +375,13 @@ export async function startShard(opts = {}) {
     region,
     port,
     stats,
+    // Freezes the simulation (used by tests to compare clients with truth).
+    pause() {
+      paused = true;
+    },
+    resume() {
+      paused = false;
+    },
     close() {
       stopped = true;
       for (const l of peerLinks.values()) l.close();

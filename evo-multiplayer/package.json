@@ -13,7 +13,7 @@
     "shard": "node src/server/shard-node.js",
     "gateway": "node src/server/gateway-node.js",
     "bots": "node bench/bots.js",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "license": "MIT",
   "dependencies": {
