@@ -585,9 +585,11 @@ export class Region {
     return e;
   }
 
-  encodeMigration(entities) {
+  // `epoch` + `seq` identify the batch so the receiver can acknowledge it
+  // and ignore a re-sent copy (see shard-node migration acks).
+  encodeMigration(entities, seq = 0, epoch = 0) {
     const w = new Writer(256 + entities.length * 128);
-    w.u8(I_MIGRATE).varint(this.shardId).varint(entities.length);
+    w.u8(I_MIGRATE).varint(this.shardId).u32(epoch).varint(seq).varint(entities.length);
     for (const e of entities) this.writeEntity(w, e);
     return w.finish();
   }
@@ -596,10 +598,12 @@ export class Region {
     const r = new Reader(bytes);
     r.u8();
     const from = r.varint();
+    const epoch = r.u32();
+    const seq = r.varint();
     const n = r.varint();
     const list = [];
     for (let i = 0; i < n; i++) list.push(this.readEntity(r));
-    return { from, entities: list };
+    return { from, epoch, seq, entities: list };
   }
 
   // ------------------------------------------------------------ persistence
@@ -655,7 +659,10 @@ export class Region {
     }
     this.tick = tick;
     this.time = time;
-    this.nextSerial = nextSerial;
+    // After a crash the snapshot may be up to SNAPSHOT_EVERY old, and ids
+    // issued since then may still be alive on other shards: skip ahead so
+    // they are never handed out twice.
+    this.nextSerial = nextSerial + 1000000;
     return true;
   }
 
@@ -749,6 +756,13 @@ export class Region {
       list.push(e);
     }
     this.ghostsFrom.set(from, list);
+  }
+
+  // A neighbour went away: its ghosts and field edges are stale, drop them
+  // rather than colliding with / diffusing against a frozen copy.
+  dropPeer(shard) {
+    this.ghostsFrom.delete(shard);
+    for (const id of [...this.ghostEdges.keys()]) if (this.topo.ownerOf(id) === shard) this.ghostEdges.delete(id);
   }
 
   // Low-detail per-chunk summary for the world overview.

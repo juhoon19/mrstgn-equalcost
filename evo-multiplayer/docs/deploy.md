@@ -24,7 +24,7 @@ cloudflared tunnel route dns soup soup.你的域名.com
 cloudflared tunnel run --url http://localhost:8080 soup
 ```
 
-启动游戏时加 `TRUST_PROXY=true`（`tunnel.sh` 已自动加上），网关才会用 `X-Forwarded-For` 区分玩家 IP（否则所有人看起来来自 127.0.0.1，会被单 IP 上限挡住）。
+启动游戏时加 `TRUST_PROXY=true IP_HEADER=cf-connecting-ip`（`tunnel.sh` 已自动加上），网关才能区分玩家 IP（否则所有人看起来来自 127.0.0.1，会被单 IP 上限挡住）。
 
 ## B. 一台 VPS（几千人）
 
@@ -95,7 +95,10 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `MAX_CLIENTS` | 单网关最大连接数 | 20000 |
 | `MAX_CHUNKS` / `MAX_CHUNKS_LO` | 高档 / 低档视野最多区块数，超过切到概览 | 30 / 80 |
 | `LO_EVERY` | 低档每几个网络帧发一次 | 4（2.5 Hz） |
-| `TRUST_PROXY` | 信任 `X-Forwarded-For`（在反代/隧道后面必须开） | false |
+| `TRUST_PROXY` | 在反代/隧道后面必须开，否则所有人都算作代理的 IP | false |
+| `IP_HEADER` | 代理会**覆盖**的真实 IP 头，如 Cloudflare 的 `cf-connecting-ip`；设了就只看它 | 空 |
+| `PROXY_HOPS` | 不设 `IP_HEADER` 时，从 `X-Forwarded-For` **右边**数第几个是客户端（= 你前面代理的层数）。左边的条目客户端可以伪造，绝不采用 | 1 |
+| `REPLAY_RATE` / `REPLAY_BURST` | 每个客户端追帧重放的字节预算（防止用很小的视口消息刷大流量） | 256KB/s / 2MB |
 | `ALLOWED_ORIGINS` | 允许的网页来源（逗号分隔，空 = 不限） | 空 |
 | `TICK_HZ` / `NET_EVERY` / `KEY_EVERY` | 模拟频率 / 每几 tick 发一帧 / 每几帧一个关键帧 | 20 / 2 / 30 |
 | `FIELD_EVERY` / `FIELD_NET_RES` | 化学场发送间隔(tick) / 发送分辨率 | 20 / 8 |
@@ -109,7 +112,7 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 - [ ] 备份 `DATA_DIR`（Docker 里是每个分片的 `shardN_data` 卷）：那就是整个世界。
 - [ ] 分片端口只在内网；防火墙只开 80/443。
 - [ ] 走 HTTPS/WSS（Caddy/Cloudflare 自动处理）。
-- [ ] 在反代后面开 `TRUST_PROXY=true`，否则单 IP 限制失效或误伤。
+- [ ] 在反代后面开 `TRUST_PROXY=true`，并按实际层数设 `PROXY_HOPS`（Caddy/Nginx 一层 = 1），或在 Cloudflare 后面设 `IP_HEADER=cf-connecting-ip`。否则单 IP 限制会误伤或被绕过。
 - [ ] 需要时设置 `ALLOWED_ORIGINS=https://你的域名`，防止别的网站嵌入你的服务器。
 - [ ] 聊天：已过滤控制字符、限长限速；如需敏感词过滤，在 `gateway-node.js` 的 `onClientJson` 里加。
 - [ ] 监控：`/healthz`（存活）、网关与分片的 `/metrics`（JSON，可接 Prometheus 的 json exporter）。

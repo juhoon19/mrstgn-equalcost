@@ -52,10 +52,14 @@ export class Link {
     });
   }
 
-  send(data) {
-    if (!this.open) return false;
+  // Returns false when the socket is not OPEN (ws silently drops data sent
+  // while CLOSING). `cb(err)` fires once the data is handed to the kernel or
+  // the send fails; it does NOT mean the peer processed it - use app-level
+  // acks for anything that must not be lost (see shard migrations).
+  send(data, cb) {
+    if (!this.open || !this.ws || this.ws.readyState !== 1) return false;
     this.bytesOut += typeof data === 'string' ? data.length : data.byteLength;
-    this.ws.send(data);
+    this.ws.send(data, cb);
     return true;
   }
 

@@ -49,6 +49,13 @@ export class Topology {
         this.owner[cy * chunksX + cx] = by * sx + bx;
       }
     }
+    const used = new Set(this.owner);
+    if (used.size !== shardCount) {
+      throw new Error(
+        `${shardCount} shards cannot be laid out as a grid on ${chunksX}x${chunksY} chunks ` +
+          `(some shard would own nothing); pick a shard count that factors into the chunk grid`,
+      );
+    }
   }
 
   get width() {

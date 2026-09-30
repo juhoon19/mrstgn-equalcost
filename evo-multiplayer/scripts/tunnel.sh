@@ -26,7 +26,9 @@ fi
 
 # Behind the tunnel every player arrives from the same local address, so the
 # per-IP cap must trust X-Forwarded-For from cloudflared.
-TRUST_PROXY=true PORT="$PORT" node src/launch.js "$@" &
+# cloudflared sets CF-Connecting-IP to the real visitor address (overwriting
+# anything the visitor sent), so that is the header to trust here.
+TRUST_PROXY=true IP_HEADER=cf-connecting-ip PORT="$PORT" node src/launch.js "$@" &
 GAME_PID=$!
 trap 'kill $GAME_PID 2>/dev/null' EXIT
 sleep 2

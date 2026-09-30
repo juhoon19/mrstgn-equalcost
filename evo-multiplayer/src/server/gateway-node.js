@@ -84,11 +84,15 @@ export async function startGateway(opts = {}) {
   const maxPerIp = Number(opts.maxPerIp ?? cfg.get('max-per-ip', 'MAX_PER_IP', 16));
   const maxClients = Number(opts.maxClients ?? cfg.get('max-clients', 'MAX_CLIENTS', 20000));
   const trustProxy = (opts.trustProxy ?? cfg.get('trust-proxy', 'TRUST_PROXY', '')) === 'true' || opts.trustProxy === true;
+  const ipHeader = String(opts.ipHeader ?? cfg.get('ip-header', 'IP_HEADER', '')).toLowerCase();
+  const proxyHops = Math.max(1, Number(opts.proxyHops ?? cfg.get('proxy-hops', 'PROXY_HOPS', 1)));
   const origins = String(opts.origins ?? cfg.get('origins', 'ALLOWED_ORIGINS', ''))
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
   const highWater = Number(opts.highWater ?? cfg.get('high-water', 'HIGH_WATER', 512 * 1024));
+  const REPLAY_RATE = Number(opts.replayRate ?? cfg.get('replay-rate', 'REPLAY_RATE', 256 * 1024)); // bytes/s
+  const REPLAY_BURST = Number(opts.replayBurst ?? cfg.get('replay-burst', 'REPLAY_BURST', 2 * 1024 * 1024));
   const netHz = Number(opts.netHz ?? cfg.get('net-hz', 'NET_HZ', 10));
   const quiet = opts.quiet ?? cfg.get('quiet', 'QUIET', '') === 'true';
   const gwId = opts.id ?? crypto.randomBytes(4).toString('hex');
@@ -284,9 +288,23 @@ export async function startGateway(opts = {}) {
       return;
     }
     if (congested || st.cache.length === 0) return;
+    if (replay(c, st)) {
+      c.chunks.set(k, 1);
+      counters.resyncs++;
+    }
+  }
+
+  // Catch-up replays (keyframe + deltas) are the one place a tiny client
+  // message can trigger a large download, so they draw from a per-client
+  // byte budget (REPLAY_RATE/s, REPLAY_BURST max). Without budget the chunk
+  // simply stays unsynced and is retried on its next frame.
+  function replay(c, st) {
+    let bytes = 0;
+    for (const f of st.cache) bytes += f.byteLength;
+    if (bytes > c.replayTokens) return false;
+    c.replayTokens -= bytes;
     for (const f of st.cache) send(c, f);
-    c.chunks.set(k, 1);
-    counters.resyncs++;
+    return true;
   }
 
   // c.chunks maps stream key -> sync state; pendingSub/Unsub hold stream keys.
@@ -302,10 +320,7 @@ export async function startGateway(opts = {}) {
     st.unsubAt = 0;
     st.clients.add(c);
     c.chunks.set(k, 0);
-    if (st.cache.length > 0 && backlog(c) < highWater) {
-      for (const f of st.cache) send(c, f);
-      c.chunks.set(k, 1);
-    }
+    if (st.cache.length > 0 && backlog(c) < highWater && replay(c, st)) c.chunks.set(k, 1);
   }
 
   function unsubscribe(c, k) {
@@ -316,6 +331,18 @@ export async function startGateway(opts = {}) {
     // Keep the shard subscription warm for a few seconds: players pan back
     // and forth, and re-subscribing costs a forced keyframe.
     if (st.clients.size === 0) st.unsubAt = Date.now() + 5000;
+  }
+
+  function applyView(c, now) {
+    const { rect, tier } = c.pendingView;
+    c.pendingView = null;
+    c.lastViewAt = now;
+    const [x0, y0, x1, y1] = rect;
+    c.view = rect;
+    const want = topo.viewChunks(x0, y0, x1, y1, viewMargin, tier ? maxChunksLo : maxChunks);
+    const wantSet = new Set((want || []).map((id) => skey(id, tier)));
+    for (const k of [...c.chunks.keys()]) if (!wantSet.has(k)) unsubscribe(c, k);
+    for (const k of wantSet) if (!c.chunks.has(k)) subscribe(c, k);
   }
 
   // ------------------------------------------------------------- clients
@@ -332,11 +359,9 @@ export async function startGateway(opts = {}) {
       const y1 = r.f32();
       const tier = buf.length === 18 && r.u8() === 1 ? 1 : 0;
       if (![x0, y0, x1, y1].every(Number.isFinite)) return;
-      c.view = [x0, y0, x1, y1];
-      const want = topo.viewChunks(x0, y0, x1, y1, viewMargin, tier ? maxChunksLo : maxChunks);
-      const wantSet = new Set((want || []).map((id) => skey(id, tier)));
-      for (const k of [...c.chunks.keys()]) if (!wantSet.has(k)) unsubscribe(c, k);
-      for (const k of wantSet) if (!c.chunks.has(k)) subscribe(c, k);
+      // At most 10 view changes per second; the latest one wins.
+      c.pendingView = { rect: [x0, y0, x1, y1], tier };
+      if (now - c.lastViewAt >= 100) applyView(c, now);
       return;
     }
     if (type === C_ACTION) {
@@ -425,10 +450,25 @@ export async function startGateway(opts = {}) {
   }
 
   // --------------------------------------------------------- web server
+  // Only origin-form targets ("/path?query"); anything else is rejected
+  // (an absolute-form target like "http://a:b:c/" would otherwise throw).
+  function safeUrl(target) {
+    if (typeof target !== 'string' || target[0] !== '/') return null;
+    try {
+      return new URL(target, 'http://x');
+    } catch {
+      return null;
+    }
+  }
   const publicDir = path.join(ROOT, 'public');
   const sharedDir = path.join(ROOT, 'src/shared');
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://x');
+    const url = safeUrl(req.url);
+    if (!url) {
+      res.statusCode = 400;
+      res.end();
+      return;
+    }
     if (url.pathname === '/healthz') {
       res.end('ok');
       return;
@@ -471,8 +511,8 @@ export async function startGateway(opts = {}) {
   });
 
   server.on('upgrade', (req, socket, head) => {
-    const url = new URL(req.url, 'http://x');
-    if (url.pathname !== '/ws') {
+    const url = safeUrl(req.url);
+    if (!url || url.pathname !== '/ws') {
       socket.destroy();
       return;
     }
@@ -481,8 +521,7 @@ export async function startGateway(opts = {}) {
       socket.destroy();
       return;
     }
-    const fwd = trustProxy ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
-    const ip = fwd || req.socket.remoteAddress || '?';
+    const ip = clientIp(req);
     if ((perIp.get(ip) || 0) >= maxPerIp || clients.size >= maxClients) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
       socket.destroy();
@@ -490,6 +529,24 @@ export async function startGateway(opts = {}) {
     }
     wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, ip));
   });
+
+  // Behind a proxy the TCP peer is the proxy. IP_HEADER names a header the
+  // proxy overwrites (e.g. cf-connecting-ip for Cloudflare); otherwise take
+  // X-Forwarded-For counted from the RIGHT: proxies append, so the left end
+  // is whatever the client typed and must not be trusted.
+  function clientIp(req) {
+    const peer = req.socket.remoteAddress || '?';
+    if (!trustProxy) return peer;
+    if (ipHeader) {
+      const v = req.headers[ipHeader];
+      return (typeof v === 'string' && v.trim()) || peer;
+    }
+    const parts = String(req.headers['x-forwarded-for'] || '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    return parts.length >= proxyHops ? parts[parts.length - proxyHops] : peer;
+  }
 
   function onConnection(ws, ip) {
     perIp.set(ip, (perIp.get(ip) || 0) + 1);
@@ -507,6 +564,10 @@ export async function startGateway(opts = {}) {
       cursorShard: -1,
       cooldowns: new Map(),
       lastChat: 0,
+      pendingView: null,
+      lastViewAt: 0,
+      replayTokens: REPLAY_BURST,
+      alive: true,
       tokens: 200,
       strikes: 0,
       bytesOut: 0,
@@ -540,6 +601,7 @@ export async function startGateway(opts = {}) {
         // Malformed input is ignored; the rate limiter handles floods.
       }
     });
+    ws.on('pong', () => (c.alive = true));
     ws.on('close', () => {
       clearTimeout(helloTimer);
       clients.delete(c);
@@ -557,6 +619,8 @@ export async function startGateway(opts = {}) {
   const flushTimer = setInterval(() => {
     for (const c of clients) {
       c.tokens = Math.min(200, c.tokens + 5);
+      c.replayTokens = Math.min(REPLAY_BURST, c.replayTokens + REPLAY_RATE / 20);
+      if (c.pendingView && Date.now() - c.lastViewAt >= 100) applyView(c, Date.now());
       if (c.cursorDirty && c.pid) {
         c.cursorDirty = false;
         const [x, y] = c.cursor;
@@ -569,7 +633,13 @@ export async function startGateway(opts = {}) {
     }
     for (let s = 0; s < shardLinks.length; s++) {
       const link = shardLinks[s];
-      if (!link.open) continue;
+      if (!link.open) {
+        // Nobody to deliver to: don't let input pile up (it would also
+        // arrive as one stale burst when the shard comes back).
+        actionBatch[s] = [];
+        cursorBatch[s].clear();
+        continue;
+      }
       for (const [t, pending] of [
         ['sub', pendingSub[s]],
         ['unsub', pendingUnsub[s]],
@@ -600,8 +670,26 @@ export async function startGateway(opts = {}) {
   let lastCounters = { ...counters, at: Date.now() };
   let secondsTicked = 0;
   let rates = {};
+  // Heartbeat: half-open connections (phone went into a tunnel, NAT dropped
+  // state) would otherwise hold a slot against MAX_PER_IP for ~15 minutes.
+  const heartbeatTimer = setInterval(() => {
+    for (const c of clients) {
+      if (!c.alive) {
+        c.ws.terminate();
+        continue;
+      }
+      c.alive = false;
+      try {
+        c.ws.ping();
+      } catch {
+        /* closing */
+      }
+    }
+  }, 20000);
+
   const secondTimer = setInterval(() => {
     const now = Date.now();
+    for (const c of clients) c.strikes = Math.max(0, c.strikes - 50);
     for (const [k, st] of chunkState) {
       if (st.clients.size === 0 && st.unsubAt && now > st.unsubAt) {
         chunkState.delete(k);
@@ -664,7 +752,7 @@ export async function startGateway(opts = {}) {
       clients: clients.size,
       players: players.size,
       watchedChunks: chunkState.size,
-      shards: shardLinks.map((l) => ({ url: l.url, open: l.open })),
+      shards: shardLinks.map((l, i) => ({ shard: i, open: l.open })), // no internal addresses
       resyncs: counters.resyncs,
       dropped: counters.dropped,
       ...rates,
@@ -680,6 +768,7 @@ export async function startGateway(opts = {}) {
     close() {
       clearInterval(flushTimer);
       clearInterval(secondTimer);
+      clearInterval(heartbeatTimer);
       for (const l of shardLinks) l.close();
       for (const c of clients) c.ws.terminate();
       wss.close();

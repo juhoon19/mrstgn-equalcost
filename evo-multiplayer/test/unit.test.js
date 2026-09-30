@@ -57,6 +57,11 @@ test('topology: every chunk has one owner, blocks are rectangles, neighbours are
   }
 });
 
+test('topology refuses shard counts that would leave a shard empty', () => {
+  assert.throws(() => new Topology({ chunksX: 6, chunksY: 6 }, 7), /cannot be laid out/);
+  assert.doesNotThrow(() => new Topology({ chunksX: 6, chunksY: 6 }, 6));
+});
+
 test('topology: view chunks and LOD cut-off', () => {
   const t = new Topology({ chunksX: 24, chunksY: 24, chunkSize: 256 }, 4);
   assert.deepEqual(t.viewChunks(10, 10, 20, 20, 0, 30), [0]);
@@ -207,7 +212,9 @@ test('shard snapshot restores entities, fields, ids and clock exactly', () => {
   const b = new Region({ topo, shardId: 1, game: soup, seed: 1 });
   assert.ok(b.restore(bytes));
   assert.equal(b.tick, a.tick);
-  assert.equal(b.nextSerial, a.nextSerial);
+  // Restore skips ids ahead so ids issued after the snapshot (possibly alive
+  // on other shards after a crash) are never reused.
+  assert.ok(b.nextSerial >= a.nextSerial + 1000000);
   for (const [id, ca] of a.chunks) {
     const cb = b.chunks.get(id);
     assert.deepEqual([...cb.field], [...ca.field]);

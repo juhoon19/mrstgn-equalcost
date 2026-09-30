@@ -232,22 +232,65 @@ export async function startShard(opts = {}) {
   const cursorChunk = new Map();
 
   // --------------------------------------------------------- peer shards
+  // Migrations are acknowledged: a batch stays "in flight" until the peer
+  // says it adopted it, and goes back to the outbox if the link drops first.
+  // Batches carry (epoch, seq) so a re-sent batch the peer already adopted
+  // is recognised and not duplicated; the epoch changes on every restart.
+  const epoch = (Math.random() * 2 ** 32) >>> 0;
+  let migSeq = 0;
+  const inflight = new Map(); // seq -> { to, list }
+  const seenBatches = new Map(); // `${from}:${epoch}` -> Set(seq) (recent)
   const peerLinks = new Map();
   const outbox = new Map(); // neighbour -> Entity[] waiting for the link
-  for (const n of region.neighbours) {
-    const url = topoCfg.shards[n];
-    peerLinks.set(n, new Link(url, { t: 'hello', role: 'shard', id: shardId, secret }, { log }));
+  function openPeer(n) {
+    const link = new Link(
+      topoCfg.shards[n],
+      { t: 'hello', role: 'shard', id: shardId, secret },
+      {
+        log,
+        onMessage: (data, isBinary) => {
+          if (isBinary) return;
+          try {
+            const msg = JSON.parse(data.toString());
+            if (msg.t === 'mack') inflight.delete(msg.seq);
+          } catch {
+            /* ignore */
+          }
+        },
+        onClose: () => requeueInflight(n),
+      },
+    );
+    peerLinks.set(n, link);
+    return link;
   }
+  function requeueInflight(n) {
+    for (const [seq, b] of inflight) {
+      if (b.to !== n) continue;
+      inflight.delete(seq);
+      const q = outbox.get(n);
+      if (q) q.push(...b.list);
+      else outbox.set(n, [...b.list]);
+    }
+  }
+  for (const n of region.neighbours) openPeer(n);
   let migratedIn = 0;
   let migratedOut = 0;
 
-  function handlePeerBinary(buf) {
+  function handlePeerBinary(ws, buf) {
     const type = buf[0];
     if (type === I_GHOST) region.applyGhosts(buf);
     else if (type === I_MIGRATE) {
-      const { entities } = region.decodeMigration(buf);
-      migratedIn += entities.length;
-      region.adopt(entities);
+      const { from, epoch: e, seq, entities } = region.decodeMigration(buf);
+      const key = `${from}:${e}`;
+      let seen = seenBatches.get(key);
+      if (!seen) seenBatches.set(key, (seen = new Set()));
+      if (!seen.has(seq)) {
+        seen.add(seq);
+        if (seen.size > 4096) seen.delete(seen.values().next().value);
+        migratedIn += entities.length;
+        region.adopt(entities);
+      }
+      if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'mack', seq }));
     }
   }
 
@@ -283,6 +326,7 @@ export async function startShard(opts = {}) {
   const wss = new WebSocketServer({ server, perMessageDeflate: false, maxPayload: 64 * 1024 * 1024 });
   wss.on('connection', (ws) => {
     let role = null;
+    let peerId = -1;
     ws.on('message', (data, isBinary) => {
       try {
         if (role === null) {
@@ -295,6 +339,8 @@ export async function startShard(opts = {}) {
           if (role === 'gateway') {
             gateways.set(ws, { id: hello.id, bytesOut: 0, queue: [] });
             log(`gateway ${hello.id} connected`);
+          } else if (role === 'shard') {
+            peerId = Number(hello.id);
           }
           return;
         }
@@ -302,7 +348,7 @@ export async function startShard(opts = {}) {
           if (isBinary) handleGatewayBinary(ws, data);
           else handleGatewayJson(ws, JSON.parse(data.toString()));
         } else if (role === 'shard') {
-          if (isBinary) handlePeerBinary(data);
+          if (isBinary) handlePeerBinary(ws, data);
         }
       } catch (err) {
         log('bad message', err.message);
@@ -313,6 +359,8 @@ export async function startShard(opts = {}) {
         unsubscribeAll(ws);
         gateways.delete(ws);
         log('gateway disconnected');
+      } else if (role === 'shard' && peerId >= 0) {
+        region.dropPeer(peerId);
       }
     });
     ws.on('error', () => {});
@@ -347,13 +395,16 @@ export async function startShard(opts = {}) {
     for (const [to, list] of outbox) {
       const link = peerLinks.get(to);
       if (link && link.open && list.length) {
-        link.send(region.encodeMigration(list));
-        migratedOut += list.length;
-        outbox.delete(to);
+        const seq = ++migSeq;
+        if (link.send(region.encodeMigration(list, seq, epoch))) {
+          inflight.set(seq, { to, list });
+          migratedOut += list.length;
+          outbox.delete(to);
+        }
       } else if (!link) {
         // Not a neighbour (entity teleported, e.g. by a big stir): open a
         // link on demand.
-        peerLinks.set(to, new Link(topoCfg.shards[to], { t: 'hello', role: 'shard', id: shardId, secret }, { log }));
+        openPeer(to);
       } else if (list.length > 20000) {
         list.splice(0, list.length - 20000);
       }
@@ -447,6 +498,11 @@ export async function startShard(opts = {}) {
       tickMsAcc = 0;
       stats.tickMsMax = 0;
       secondStart = nowP;
+      // Forget cursor locations whose cursor already expired or was cleared.
+      for (const [pid, id] of cursorChunk) {
+        const c = region.chunks.get(id);
+        if (!c || !c.cursors.has(pid)) cursorChunk.delete(pid);
+      }
     }
   }
 
