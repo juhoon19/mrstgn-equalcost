@@ -11,6 +11,7 @@ export const S_FIELD = 2; // per-chunk chemical field, quantised to u8
 export const S_SUMMARY = 3; // whole-world low-detail overview (minimap / zoomed-out LOD)
 export const S_PONG = 4;
 export const S_EVENTS = 5; // per-chunk transient cursors, chat bubbles, action effects
+export const S_BATCH = 6; // several of the above in one WebSocket message
 
 // ---- client -> server (binary, first byte) ----
 export const C_VIEW = 10; // viewport rectangle
@@ -66,6 +67,54 @@ export function encodeCursor(x, y) {
 
 export function encodePing(n) {
   return new Writer(5).u8(C_PING).u32(n).finish();
+}
+
+// Coalescing: many small binary messages -> one WebSocket message.
+// Layout: u8 S_BATCH, then repeated (varint length, bytes). Sending one
+// message per client per tick instead of ~30 is the single biggest CPU win
+// on the fan-out path (fewer syscalls, frame headers and callbacks).
+export function packBatch(parts) {
+  if (parts.length === 1) return parts[0];
+  let total = 1;
+  for (const p of parts) total += varintSize(p.length) + p.length;
+  const out = new Uint8Array(total);
+  out[0] = S_BATCH;
+  let pos = 1;
+  for (const p of parts) {
+    let n = p.length;
+    while (n >= 0x80) {
+      out[pos++] = (n & 0x7f) | 0x80;
+      n >>>= 7;
+    }
+    out[pos++] = n;
+    out.set(p, pos);
+    pos += p.length;
+  }
+  return out;
+}
+
+function varintSize(n) {
+  let k = 1;
+  while (n >= 0x80) {
+    n >>>= 7;
+    k++;
+  }
+  return k;
+}
+
+// Calls fn(subMessage) for each message inside a batch (or once for a plain
+// message). Sub-messages are views into `bytes`, not copies.
+export function unpackBatch(bytes, fn) {
+  if (bytes[0] !== S_BATCH) {
+    fn(bytes);
+    return;
+  }
+  const r = new Reader(bytes);
+  r.u8();
+  while (r.remaining > 0) {
+    const n = r.varint();
+    fn(r.bytes(n));
+  }
 }
 
 // Reads the fixed header of an S_CHUNK / S_FIELD / S_EVENTS message without

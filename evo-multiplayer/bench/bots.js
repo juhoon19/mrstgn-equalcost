@@ -16,7 +16,9 @@ import {
   S_EVENTS,
   S_SUMMARY,
   S_PONG,
+  S_BATCH,
   ACTIONS,
+  unpackBatch,
   encodeView,
   encodeCursor,
   encodeAction,
@@ -80,15 +82,19 @@ class Bot {
   onMessage(data, isBinary) {
     totals.bytes += data.length;
     totals.msgs++;
-    const k = isBinary ? data[0] : 'json';
-    byType[k] = (byType[k] || 0) + data.length;
+    if (!isBinary) byType.json = (byType.json || 0) + data.length;
     if (!isBinary) {
       const msg = JSON.parse(data.toString());
       if (msg.t === 'welcome') this.onWelcome(msg);
       else if (msg.t === 'stats') totals.stats = msg;
       return;
     }
+    unpackBatch(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), (m) => this.onBinary(m, isBinary));
+  }
+
+  onBinary(data) {
     const type = data[0];
+    if (data !== undefined) byType['b' + type] = (byType['b' + type] || 0) + data.length;
     const now = performance.now();
     if (type === S_CHUNK) {
       totals.chunkFrames++;
@@ -225,7 +231,7 @@ setTimeout(() => {
     ...err,
   };
   const tot = Object.values(byType).reduce((a, b) => a + b, 0);
-  const names = { 1: 'chunk', 2: 'field', 3: 'summary', 4: 'pong', 5: 'events', json: 'json' };
+  const names = { b1: 'chunk', b2: 'field', b3: 'summary', b4: 'pong', b5: 'events', json: 'json' };
   console.log('[bots] bytes by type: ' + Object.entries(byType).map(([k, v]) => `${names[k] || k}=${((100 * v) / tot).toFixed(1)}%`).join(' '));
   console.log('[bots] result ' + JSON.stringify(result));
   for (const b of bots) {

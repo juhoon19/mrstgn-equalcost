@@ -156,47 +156,50 @@ export function init(region) {
   }
 }
 
+const input = new Float64Array(IN);
+const hidden = new Float64Array(HID);
+
 function brain(region, e) {
   const d = e.data;
   const g = d.genome;
-  const [gnx, gny] = region.fieldGradient(e.x, e.y, N);
-  const [gsx, gsy] = region.fieldGradient(e.x, e.y, S);
+  // Field gradients (central differences on the field grid).
+  const hc = region.fieldCell;
+  const gx = Math.floor(e.x / hc);
+  const gy = Math.floor(e.y / hc);
+  const inv = 4 / (2 * hc);
+  input[0] = (region.fieldAt(gx + 1, gy, N) - region.fieldAt(gx - 1, gy, N)) * inv;
+  input[1] = (region.fieldAt(gx, gy + 1, N) - region.fieldAt(gx, gy - 1, N)) * inv;
+  input[2] = (region.fieldAt(gx + 1, gy, S) - region.fieldAt(gx - 1, gy, S)) * inv;
+  input[3] = (region.fieldAt(gx, gy + 1, S) - region.fieldAt(gx, gy - 1, S)) * inv;
+  const s = size(e);
+  input[4] = (e.energy / (P.divideAt * s * s)) * 2 - 1;
   // Nearest other cell within sensing range.
-  let best = 1e9;
-  let nx = 0;
-  let ny = 0;
-  let rel = 0;
   const range = 60;
-  region.near(e.x, e.y, range, (o) => {
-    if (o === e || o.kind !== KIND_CELL) return;
+  const o = region.nearest(e.x, e.y, range, e, KIND_CELL);
+  if (o) {
     const dx = o.x - e.x;
     const dy = o.y - e.y;
-    const d2 = dx * dx + dy * dy;
-    if (d2 < best && d2 < range * range) {
-      best = d2;
-      nx = dx;
-      ny = dy;
-      rel = o.r / e.r - 1;
-    }
-  });
-  if (best < 1e9) {
-    const dist = Math.sqrt(best) + 1e-6;
+    const dist = Math.sqrt(dx * dx + dy * dy) + 1e-6;
     const k = 1 - dist / range;
-    nx = (nx / dist) * k;
-    ny = (ny / dist) * k;
+    input[5] = (dx / dist) * k;
+    input[6] = (dy / dist) * k;
+    const rel = o.r / e.r - 1;
+    input[7] = rel < -1 ? -1 : rel > 1 ? 1 : rel;
+  } else {
+    input[5] = 0;
+    input[6] = 0;
+    input[7] = 0;
   }
-  const s = size(e);
-  const input = [gnx * 4, gny * 4, gsx * 4, gsy * 4, (e.energy / (P.divideAt * s * s)) * 2 - 1, nx, ny, Math.max(-1, Math.min(1, rel)), 1];
-  const h = [0, 0, 0, 0, 0, 0];
+  input[8] = 1;
   for (let j = 0; j < HID; j++) {
     let a = 0;
     for (let i = 0; i < IN; i++) a += input[i] * g[i * HID + j];
-    h[j] = Math.tanh(a);
+    hidden[j] = Math.tanh(a);
   }
-  for (let o = 0; o < OUT; o++) {
+  for (let q = 0; q < OUT; q++) {
     let a = 0;
-    for (let j = 0; j < HID; j++) a += h[j] * g[W1 + j * OUT + o];
-    d.out[o] = o < 2 ? Math.tanh(a) : 1 / (1 + Math.exp(-a));
+    for (let j = 0; j < HID; j++) a += hidden[j] * g[W1 + j * OUT + q];
+    d.out[q] = q < 2 ? Math.tanh(a) : 1 / (1 + Math.exp(-a));
   }
 }
 
@@ -333,10 +336,19 @@ export function react(region, chunk, dt) {
   const oy = chunk.cy * S0;
   const f = chunk.field;
   const t = region.time;
+  // Light drifts over minutes: cache it per chunk and refresh every 5 s.
+  if (!chunk.light || t - chunk.lightT > 5) {
+    chunk.light = chunk.light || new Float32Array(G * G);
+    chunk.lightT = t;
+    for (let ly = 0; ly < G; ly++) {
+      for (let lx = 0; lx < G; lx++) chunk.light[ly * G + lx] = light(ox + (lx + 0.5) * h, oy + (ly + 0.5) * h, t);
+    }
+  }
+  const lightMap = chunk.light;
   for (let ly = 0; ly < G; ly++) {
     for (let lx = 0; lx < G; lx++) {
       const i = (ly * G + lx) * C;
-      const L = light(ox + (lx + 0.5) * h, oy + (ly + 0.5) * h, t);
+      const L = lightMap[ly * G + lx];
       const conv = P.wasteToNutrient * L * f[i + W] * dt;
       f[i + W] -= conv;
       const n = f[i + N] + conv;

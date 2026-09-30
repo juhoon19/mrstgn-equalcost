@@ -9,7 +9,7 @@ import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { Topology } from '../shared/topology.js';
 import { Reader } from '../shared/codec.js';
-import { I_ACTIONS, I_CURSORS, I_MIGRATE, I_GHOST, I_SUMMARY, EV_ACTION, EV_CHAT } from '../shared/protocol.js';
+import { I_ACTIONS, I_CURSORS, I_MIGRATE, I_GHOST, I_SUMMARY, EV_ACTION, EV_CHAT, packBatch } from '../shared/protocol.js';
 import { Writer } from '../shared/codec.js';
 import { Region } from './region.js';
 import { Link, readClusterConfig } from './link.js';
@@ -45,8 +45,12 @@ export async function startShard(opts = {}) {
   const gateways = new Map(); // ws -> { id, bytesOut }
   const onlineByGateway = new Map(); // gw id -> { n, t }
 
+  // Binary output to each gateway is queued during a tick and sent as one
+  // batch at the end of it (flushGateways).
   function sendGw(ws, data) {
     if (ws.readyState !== 1) return;
+    const g = gateways.get(ws);
+    if (!g) return;
     if (ws.bufferedAmount > 64 * 1024 * 1024) {
       // A gateway that cannot keep up would desync every chunk it watches;
       // drop it and let it reconnect and resubscribe from keyframes.
@@ -54,9 +58,35 @@ export async function startShard(opts = {}) {
       ws.terminate();
       return;
     }
-    ws.send(data);
-    const g = gateways.get(ws);
-    if (g) g.bytesOut += typeof data === 'string' ? data.length : data.byteLength;
+    if (typeof data === 'string') {
+      ws.send(data);
+      g.bytesOut += data.length;
+      return;
+    }
+    g.queue.push(data);
+    g.bytesOut += data.byteLength;
+  }
+
+  function flushGateways() {
+    for (const [ws, g] of gateways) {
+      if (g.queue.length === 0) continue;
+      if (ws.readyState === 1) {
+        // Keep individual WebSocket messages to a few MB.
+        let part = [];
+        let size = 0;
+        for (const m of g.queue) {
+          part.push(m);
+          size += m.byteLength;
+          if (size > 4 * 1024 * 1024) {
+            ws.send(packBatch(part), { binary: true });
+            part = [];
+            size = 0;
+          }
+        }
+        if (part.length) ws.send(packBatch(part), { binary: true });
+      }
+      g.queue = [];
+    }
   }
 
   function unsubscribeAll(ws) {
@@ -207,7 +237,7 @@ export async function startShard(opts = {}) {
           }
           role = hello.role;
           if (role === 'gateway') {
-            gateways.set(ws, { id: hello.id, bytesOut: 0 });
+            gateways.set(ws, { id: hello.id, bytesOut: 0, queue: [] });
             log(`gateway ${hello.id} connected`);
           }
           return;
@@ -289,7 +319,7 @@ export async function startShard(opts = {}) {
         chunk.forceKey = false;
         const frame = encodeChunkFrame(chunk, chunkSize, key);
         for (const ws of chunk.subscribers) sendGw(ws, frame);
-        const ev = encodeEvents(chunk, chunkSize, region.players, now);
+        const ev = encodeEvents(chunk, chunkSize, region.players, now, (region.tick / netEvery) % 2 === 0);
         if (ev) for (const ws of chunk.subscribers) sendGw(ws, ev);
       }
     }
@@ -333,6 +363,7 @@ export async function startShard(opts = {}) {
       );
     }
 
+    flushGateways();
     const took = performance.now() - t0;
     tickMsAcc += took;
     stats.tickMsMax = Math.max(stats.tickMsMax, took);

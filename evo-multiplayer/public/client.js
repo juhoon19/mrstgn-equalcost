@@ -21,6 +21,7 @@ import {
   encodePing,
   decodeEvents,
   decodeSummary,
+  unpackBatch,
 } from '/shared/protocol.js';
 import { Reader } from '/shared/codec.js';
 import { hueToRgb, rgbToCss } from '/shared/color.js';
@@ -144,7 +145,10 @@ function onMessage(data) {
     return;
   }
   bytesIn += data.byteLength;
-  const bytes = new Uint8Array(data);
+  unpackBatch(new Uint8Array(data), onBinary);
+}
+
+function onBinary(bytes) {
   const now = performance.now();
   switch (bytes[0]) {
     case S_CHUNK:

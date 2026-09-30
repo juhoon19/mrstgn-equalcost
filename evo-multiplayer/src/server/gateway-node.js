@@ -39,7 +39,10 @@ import {
   I_ACTIONS,
   I_CURSORS,
   I_SUMMARY,
+  S_BATCH,
   F_KEY,
+  packBatch,
+  unpackBatch,
   ACTION_COOLDOWN_MS,
   peekChunkHeader,
 } from '../shared/protocol.js';
@@ -168,6 +171,11 @@ export async function startGateway(opts = {}) {
       if (msg.t === 'lb') lbByShard.set(shard, msg);
       return;
     }
+    if (data[0] === S_BATCH) unpackBatch(data, (m) => onShardBinary(m));
+    else onShardBinary(data);
+  }
+
+  function onShardBinary(data) {
     const type = data[0];
     if (type === S_CHUNK) {
       counters.framesIn++;
@@ -186,7 +194,7 @@ export async function startGateway(opts = {}) {
       const st = chunkState.get(r.varint());
       if (!st) return;
       for (const c of st.clients) {
-        if (c.ws.bufferedAmount < highWater) send(c, data);
+        if (backlog(c) < highWater) send(c, data);
         else counters.dropped++;
       }
     } else if (type === I_SUMMARY) {
@@ -207,13 +215,44 @@ export async function startGateway(opts = {}) {
     }
   }
 
+  // Binary output is queued per client and flushed once per event-loop turn
+  // as a single S_BATCH message (see packBatch). Text (rare) goes directly.
+  const dirty = new Set();
+  let flushScheduled = false;
   function send(c, data) {
     if (c.ws.readyState !== 1) return;
-    c.ws.send(data);
     const n = typeof data === 'string' ? data.length : data.byteLength;
     c.bytesOut += n;
     counters.bytesOut += n;
-    counters.msgsOut++;
+    if (typeof data === 'string') {
+      c.ws.send(data);
+      counters.msgsOut++;
+      return;
+    }
+    c.queue.push(data);
+    c.queued += n;
+    dirty.add(c);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      setImmediate(flushClients);
+    }
+  }
+
+  function flushClients() {
+    flushScheduled = false;
+    for (const c of dirty) {
+      if (c.queue.length && c.ws.readyState === 1) {
+        c.ws.send(packBatch(c.queue), { binary: true });
+        counters.msgsOut++;
+      }
+      c.queue = [];
+      c.queued = 0;
+    }
+    dirty.clear();
+  }
+
+  function backlog(c) {
+    return c.ws.bufferedAmount + c.queued;
   }
 
   // State per (client, chunk): 1 = in sync, receives deltas; 0 = needs a
@@ -222,7 +261,7 @@ export async function startGateway(opts = {}) {
   // the client is marked out of sync and later caught up from the cache.
   function deliverChunk(c, chunkId, st, data) {
     const state = c.chunks.get(chunkId);
-    const congested = c.ws.bufferedAmount > highWater;
+    const congested = backlog(c) > highWater;
     if (state === 1) {
       if (congested) {
         c.chunks.set(chunkId, 0);
@@ -250,7 +289,7 @@ export async function startGateway(opts = {}) {
     st.unsubAt = 0;
     st.clients.add(c);
     c.chunks.set(id, 0);
-    if (st.cache.length > 0 && c.ws.bufferedAmount < highWater) {
+    if (st.cache.length > 0 && backlog(c) < highWater) {
       for (const f of st.cache) send(c, f);
       c.chunks.set(id, 1);
     }
@@ -455,6 +494,8 @@ export async function startGateway(opts = {}) {
       tokens: 200,
       strikes: 0,
       bytesOut: 0,
+      queue: [],
+      queued: 0,
     };
     clients.add(c);
     const helloTimer = setTimeout(() => {
@@ -539,6 +580,7 @@ export async function startGateway(opts = {}) {
   }, 50);
 
   let lastCounters = { ...counters, at: Date.now() };
+  let secondsTicked = 0;
   let rates = {};
   const secondTimer = setInterval(() => {
     const now = Date.now();
@@ -577,9 +619,14 @@ export async function startGateway(opts = {}) {
       .slice(0, 15)
       .map(([pid, n]) => [pid, names.get(pid) ?? players.get(pid)?.name ?? '?', n]);
     const statsMsg = JSON.stringify({ t: 'stats', online: Math.max(online, players.size), cells, entities, tidi, top });
+    // The overview changes slowly: every 2 s is plenty (first second for new joiners).
+    const sendSummary = (secondsTicked++ & 1) === 0;
     for (const c of clients) {
-      if (!c.pid || c.ws.bufferedAmount > highWater) continue;
-      send(c, sumBuf);
+      if (!c.pid || backlog(c) > highWater) continue;
+      if (sendSummary || !c.gotSummary) {
+        send(c, sumBuf);
+        c.gotSummary = true;
+      }
       send(c, statsMsg);
     }
 

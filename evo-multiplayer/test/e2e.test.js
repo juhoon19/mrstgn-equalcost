@@ -8,7 +8,7 @@ import { startShard } from '../src/server/shard-node.js';
 import { startGateway } from '../src/server/gateway-node.js';
 import { loadGame } from '../src/server/game-loader.js';
 import { POS_QUANT } from '../src/shared/topology.js';
-import { ClientWorld, S_CHUNK, S_EVENTS, ACTIONS, encodeView, encodeAction, encodeCursor, decodeEvents } from '../src/shared/protocol.js';
+import { ClientWorld, S_CHUNK, S_EVENTS, ACTIONS, encodeView, encodeAction, encodeCursor, decodeEvents, unpackBatch } from '../src/shared/protocol.js';
 
 const base = 20000 + Math.floor(Math.random() * 20000);
 const topology = {
@@ -49,9 +49,10 @@ function client(hello = {}) {
       }
       return;
     }
-    const u8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    if (u8[0] === S_CHUNK) c.world.applyChunk(u8, performance.now());
-    else if (u8[0] === S_EVENTS) c.events.push(decodeEvents(u8, c.welcome.world, c.welcome.posQuant));
+    unpackBatch(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), (u8) => {
+      if (u8[0] === S_CHUNK) c.world.applyChunk(u8, performance.now());
+      else if (u8[0] === S_EVENTS) c.events.push(decodeEvents(u8, c.welcome.world, c.welcome.posQuant));
+    });
   });
   return c;
 }

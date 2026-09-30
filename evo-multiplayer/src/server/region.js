@@ -133,6 +133,7 @@ export class Region {
     this.hashGen = 0;
     this.local = []; // flat list of live local entities, rebuilt each tick
     this.maxEntitiesPerChunk = 400;
+    this.fieldEvery = 2;
   }
 
   // ---------------------------------------------------------------- entities
@@ -245,6 +246,38 @@ export class Region {
     }
   }
 
+  // Nearest local-or-ghost entity of `kind` within `range` of (x, y), other
+  // than `exclude`. Allocation-free (no callback), for hot sensing loops.
+  nearest(x, y, range, exclude, kind) {
+    const s = this.hashCell;
+    const gx0 = Math.floor((x - range) / s);
+    const gy0 = Math.floor((y - range) / s);
+    const gx1 = Math.floor((x + range) / s);
+    const gy1 = Math.floor((y + range) / s);
+    const gen = this.hashGen;
+    let best = range * range;
+    let found = null;
+    for (let gy = gy0; gy <= gy1; gy++) {
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const cell = this.hash.get(gy * 65536 + gx);
+        if (!cell || cell.gen !== gen) continue;
+        const list = cell.list;
+        for (let i = 0; i < list.length; i++) {
+          const o = list[i];
+          if (o === exclude || o.kind !== kind) continue;
+          const dx = o.x - x;
+          const dy = o.y - y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < best) {
+            best = d2;
+            found = o;
+          }
+        }
+      }
+    }
+    return found;
+  }
+
   // ------------------------------------------------------------------ field
 
   // Value of channel ch at global field cell (gx, gy). Reads owned chunks
@@ -354,37 +387,46 @@ export class Region {
     for (const [cx, cy] of cells) this.fieldAdd(cx, cy, ch, per);
   }
 
+  // Explicit diffusion + decay on a padded copy of each chunk: the one-cell
+  // halo comes from the neighbouring chunk (owned) or its ghost edge row
+  // (foreign), or mirrors the chunk itself at the world wall.
   stepField(dt) {
     const { G, C } = this;
+    const P = G + 2;
+    const pad = this._pad || (this._pad = new Float32Array(P * P));
     const h2 = this.fieldCell * this.fieldCell;
     const diff = this.game.fieldDiffusion;
     const decay = this.game.fieldDecay;
     for (const chunk of this.chunks.values()) {
       const f = chunk.field;
       const out = chunk.fieldNext;
-      const baseX = chunk.cx * G;
-      const baseY = chunk.cy * G;
-      for (let ly = 0; ly < G; ly++) {
-        for (let lx = 0; lx < G; lx++) {
-          const interior = lx > 0 && ly > 0 && lx < G - 1 && ly < G - 1;
-          const idx = (ly * G + lx) * C;
-          for (let ch = 0; ch < C; ch++) {
-            const v = f[idx + ch];
-            let sum;
-            if (interior) {
-              sum = f[idx - C + ch] + f[idx + C + ch] + f[idx - G * C + ch] + f[idx + G * C + ch];
-            } else {
-              const gx = baseX + lx;
-              const gy = baseY + ly;
-              sum =
-                this.fieldAt(gx - 1, gy, ch) +
-                this.fieldAt(gx + 1, gy, ch) +
-                this.fieldAt(gx, gy - 1, ch) +
-                this.fieldAt(gx, gy + 1, ch);
-            }
-            let nv = v + dt * ((diff[ch] * (sum - 4 * v)) / h2 - decay[ch] * v);
+      const { cx, cy } = chunk;
+      // Neighbour sources: [array, stride-mode] resolved once per chunk.
+      const west = this.haloSource(cx - 1, cy, 3);
+      const east = this.haloSource(cx + 1, cy, 2);
+      const north = this.haloSource(cx, cy - 1, 1);
+      const south = this.haloSource(cx, cy + 1, 0);
+      for (let ch = 0; ch < C; ch++) {
+        for (let y = 0; y < G; y++) {
+          const row = (y + 1) * P + 1;
+          for (let x = 0; x < G; x++) pad[row + x] = f[(y * G + x) * C + ch];
+        }
+        for (let i = 0; i < G; i++) {
+          pad[(i + 1) * P] = this.haloValue(west, G - 1, i, i, ch, f, 0, i);
+          pad[(i + 1) * P + G + 1] = this.haloValue(east, 0, i, i, ch, f, G - 1, i);
+          pad[i + 1] = this.haloValue(north, i, G - 1, i, ch, f, i, 0);
+          pad[(G + 1) * P + i + 1] = this.haloValue(south, i, 0, i, ch, f, i, G - 1);
+        }
+        const k = (dt * diff[ch]) / h2;
+        const d = 1 - dt * decay[ch];
+        for (let y = 0; y < G; y++) {
+          const row = (y + 1) * P + 1;
+          for (let x = 0; x < G; x++) {
+            const j = row + x;
+            const v = pad[j];
+            let nv = v * d + k * (pad[j - 1] + pad[j + 1] + pad[j - P] + pad[j + P] - 4 * v);
             if (nv < 0) nv = 0;
-            out[idx + ch] = nv;
+            out[(y * G + x) * C + ch] = nv;
           }
         }
       }
@@ -396,6 +438,25 @@ export class Region {
     }
   }
 
+  // side: which ghost edge of a foreign chunk faces us (0 top,1 bottom,2 left,3 right)
+  haloSource(cx, cy, side) {
+    if (!this.topo.inBounds(cx, cy)) return null;
+    const id = this.topo.chunkId(cx, cy);
+    const own = this.chunks.get(id);
+    if (own) return { field: own.field, edges: null, side };
+    const edges = this.ghostEdges.get(id);
+    return edges ? { field: null, edges, side } : null;
+  }
+
+  // Value at local cell (lx, ly) of the neighbour described by src (i indexes
+  // along the shared edge); falls back to our own cell (mx, my) = reflection.
+  haloValue(src, lx, ly, i, ch, self, mx, my) {
+    const { G, C } = this;
+    if (!src) return self[(my * G + mx) * C + ch];
+    if (src.field) return src.field[(ly * G + lx) * C + ch];
+    return src.edges[(src.side * G + i) * C + ch];
+  }
+
   // ------------------------------------------------------------------- tick
 
   // Advances one fixed step. Returns Map<shardId, Entity[]> of emigrants.
@@ -405,8 +466,14 @@ export class Region {
     this.flushSpawns();
     this.rebuildHash();
     this.game.step(this, dt);
-    this.stepField(dt);
-    if (this.game.react) for (const chunk of this.chunks.values()) this.game.react(this, chunk, dt);
+    // Chemistry is slow compared with motion: step it every `fieldEvery`
+    // ticks with a proportionally larger dt (still well inside the explicit
+    // scheme's stability limit D*dt/h^2 <= 1/4 for the demo's constants).
+    if (this.tick % this.fieldEvery === 0) {
+      const fdt = dt * this.fieldEvery;
+      this.stepField(fdt);
+      if (this.game.react) for (const chunk of this.chunks.values()) this.game.react(this, chunk, fdt);
+    }
     this.flushSpawns();
     return this.rebucket();
   }

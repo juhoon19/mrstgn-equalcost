@@ -158,7 +158,10 @@ export function decodeFieldValue(q) {
 
 // Cursors of players looking at / pointing into this chunk, plus one-off
 // events (chat bubbles, tool effects). Returns null when there is nothing new.
-export function encodeEvents(chunk, chunkSize, players, now, cursorTtl = 3000, maxCursors = 32) {
+export function encodeEvents(chunk, chunkSize, players, now, cursorFrame = true, cursorTtl = 3000, maxCursors = 32) {
+  // Cursor-only updates go out at most on "cursor frames" (half the net
+  // rate); one-off events always go out immediately.
+  if (!cursorFrame && chunk.events.length === 0) return null;
   const ox = chunk.cx * chunkSize;
   const oy = chunk.cy * chunkSize;
   const qmax = Math.min(65535, chunkSize * POS_QUANT);
