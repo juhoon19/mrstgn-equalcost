@@ -1,0 +1,14 @@
+# Automatic HTTPS (Let's Encrypt) for $DOMAIN and WebSocket-aware load
+# balancing over every gateway replica (docker DNS returns all of them).
+# Gateways are stateless, so no sticky sessions are needed.
+{$DOMAIN} {
+	reverse_proxy {
+		dynamic a {
+			name gateway
+			port 8080
+			refresh 5s
+		}
+		lb_policy least_conn
+		fail_duration 10s
+	}
+}

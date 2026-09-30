@@ -13,7 +13,8 @@ import { ClientWorld, S_CHUNK, S_EVENTS, ACTIONS, encodeView, encodeAction, enco
 const base = 20000 + Math.floor(Math.random() * 20000);
 const topology = {
   world: { chunksX: 6, chunksY: 6 },
-  shards: [`ws://127.0.0.1:${base}`, `ws://127.0.0.1:${base + 1}`],
+  // 2x2 shard grid: exercises edge AND diagonal (corner) handoffs.
+  shards: [0, 1, 2, 3].map((i) => `ws://127.0.0.1:${base + i}`),
 };
 const secret = 'test-secret';
 let shards = [];
@@ -23,7 +24,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 before(async () => {
   const game = await loadGame('soup');
   shards = await Promise.all(
-    [0, 1].map((i) => startShard({ shard: i, port: base + i, topology, secret, game, netEvery: 1, quiet: true, seed: 5 })),
+    [0, 1, 2, 3].map((i) => startShard({ shard: i, port: base + i, topology, secret, game, netEvery: 1, quiet: true, seed: 5 })),
   );
   gateway = await startGateway({ port: 0, host: '127.0.0.1', topology, secret, maxChunks: 100, quiet: true, maxPerIp: 4 });
   await sleep(500);

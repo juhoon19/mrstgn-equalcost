@@ -1,0 +1,63 @@
+# Multi-process deployment on one host (or a swarm): 4 shards on a private
+# network, N gateways behind Caddy (automatic HTTPS + load balancing).
+#
+#   cd deploy
+#   DOMAIN=soup.example.com CLUSTER_SECRET=$(openssl rand -hex 16) \
+#   TOKEN_SECRET=$(openssl rand -hex 16) docker compose up -d --scale gateway=3
+#
+# Every service reads the same TOPOLOGY; shard i must be reachable at
+# shards[i]. To move shards onto other machines, change their URLs.
+
+x-common: &common
+  build: ..
+  image: evo-multiplayer
+  restart: unless-stopped
+  environment: &env
+    TOPOLOGY: '{"world":{"chunksX":32,"chunksY":32},"shards":["ws://shard0:9100","ws://shard1:9100","ws://shard2:9100","ws://shard3:9100"]}'
+    CLUSTER_SECRET: ${CLUSTER_SECRET:?set CLUSTER_SECRET}
+    TOKEN_SECRET: ${TOKEN_SECRET:?set TOKEN_SECRET}
+    GAME: soup
+    QUIET: 'true'
+  networks: [internal]
+
+services:
+  shard0:
+    <<: *common
+    command: ['node', 'src/server/shard-node.js']
+    environment: { <<: *env, SHARD_ID: '0', HOST: '0.0.0.0', PORT: '9100' }
+  shard1:
+    <<: *common
+    command: ['node', 'src/server/shard-node.js']
+    environment: { <<: *env, SHARD_ID: '1', HOST: '0.0.0.0', PORT: '9100' }
+  shard2:
+    <<: *common
+    command: ['node', 'src/server/shard-node.js']
+    environment: { <<: *env, SHARD_ID: '2', HOST: '0.0.0.0', PORT: '9100' }
+  shard3:
+    <<: *common
+    command: ['node', 'src/server/shard-node.js']
+    environment: { <<: *env, SHARD_ID: '3', HOST: '0.0.0.0', PORT: '9100' }
+
+  gateway:
+    <<: *common
+    command: ['node', 'src/server/gateway-node.js']
+    environment: { <<: *env, PORT: '8080', HOST: '0.0.0.0', TRUST_PROXY: 'true', MAX_PER_IP: '16' }
+    depends_on: [shard0, shard1, shard2, shard3]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ['80:80', '443:443', '443:443/udp']
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [gateway]
+    networks: [internal]
+
+networks:
+  internal: {}
+
+volumes:
+  caddy_data: {}

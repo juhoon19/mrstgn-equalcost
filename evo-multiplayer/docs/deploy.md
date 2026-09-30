@@ -1,0 +1,111 @@
+# 部署到公网
+
+按人数从小到大四种方式。它们跑的是同一份代码，只是进程放在哪里不同。
+
+## A. 家里电脑 + Cloudflare 快速隧道（≈200 人以内）
+
+不需要域名、公网 IP、路由器端口转发。
+
+```bash
+# 先装 cloudflared：macOS `brew install cloudflared`；Windows `winget install --id Cloudflare.cloudflared`
+cd evo-multiplayer
+npm install
+./scripts/tunnel.sh              # 启动游戏 + 隧道，终端里会打印 https://xxxx.trycloudflare.com
+```
+
+把打印出来的地址发给别人即可。限制：Cloudflare 对快速隧道有**同时 200 个在途请求**的硬上限，每条 WebSocket 连接占一个，且没有可用性保证。电脑关机，服务就停。
+
+**超过 200 人**：注册免费 Cloudflare 账号，把域名托管到 Cloudflare，建一个**命名隧道**（没有这个上限）：
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create soup
+cloudflared tunnel route dns soup soup.你的域名.com
+cloudflared tunnel run --url http://localhost:8080 soup
+```
+
+启动游戏时加 `TRUST_PROXY=true`（`tunnel.sh` 已自动加上），网关才会用 `X-Forwarded-For` 区分玩家 IP（否则所有人看起来来自 127.0.0.1，会被单 IP 上限挡住）。
+
+## B. 一台 VPS（几千人）
+
+推荐 4–8 核、带宽足（每人约 150–400 kbps，1000 人 ≈ 150–400 Mbps）。
+
+```bash
+# 服务器上（Ubuntu），装好 Docker 后：
+git clone <你的仓库> && cd <仓库>/evo-multiplayer/deploy
+export DOMAIN=soup.你的域名.com                      # 先把域名 A 记录指向这台服务器
+export CLUSTER_SECRET=$(openssl rand -hex 16)
+export TOKEN_SECRET=$(openssl rand -hex 16)           # 固定下来！换了玩家会丢身份
+docker compose up -d --scale gateway=3
+```
+
+得到：4 个分片容器（只在内部网络）、3 个网关容器、Caddy 自动申请 HTTPS 证书并把 `wss://` 连接均衡到各网关。打开 `https://soup.你的域名.com`。
+
+调整：
+- 加网关：`docker compose up -d --scale gateway=6`（人多、出口 CPU 高时）。
+- 加分片：编辑 `docker-compose.yml`，增加 `shardN` 服务，并在 `TOPOLOGY.shards` 数组里加上它的地址，`docker compose up -d`（分片数变了，世界会重新划分，当前是重开世界）。
+- 世界大小：改 `TOPOLOGY.world.chunksX/chunksY`。
+
+不用 Docker 也行：单机直接 `PORT=8080 node src/launch.js --shards 4 --gateways 3`，前面放 Caddy/Nginx 反代到 8080（要支持 WebSocket upgrade）。
+
+## C. Fly.io（不想管服务器）
+
+```bash
+cd evo-multiplayer
+fly launch --config deploy/fly.toml --copy-config --no-deploy
+fly secrets set CLUSTER_SECRET=$(openssl rand -hex 16) TOKEN_SECRET=$(openssl rand -hex 16)
+fly deploy --config deploy/fly.toml
+```
+
+单机里跑多个分片和网关进程（`SHARDS`、`GATEWAYS` 环境变量）。
+
+## D. 多台机器（上万人）
+
+每个进程都读同一个 `TOPOLOGY`（JSON）：
+
+```json
+{"world":{"chunksX":48,"chunksY":48},
+ "shards":["ws://10.0.0.11:9100","ws://10.0.0.12:9100","ws://10.0.0.13:9100","ws://10.0.0.14:9100",
+           "ws://10.0.0.15:9100","ws://10.0.0.16:9100","ws://10.0.0.17:9100","ws://10.0.0.18:9100"]}
+```
+
+```bash
+# 分片机器 i（内网）
+TOPOLOGY='…' SHARD_ID=i HOST=0.0.0.0 PORT=9100 CLUSTER_SECRET=… node src/server/shard-node.js
+# 网关机器（任意多台，放在负载均衡后面）
+TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true node src/server/gateway-node.js
+```
+
+- 分片之间、网关到分片之间需要内网互通；分片端口**不要**暴露公网。
+- 所有机器开 NTP 时间同步（客户端用分片时钟判断哪条信息更新，偏差几十毫秒内都没问题）。
+- 负载均衡器：任何支持 WebSocket 的 L4/L7 均可（云厂商 LB、Caddy、Nginx、HAProxy、Cloudflare）。**不需要粘性会话**。
+- 网关可以按地区部署（离玩家近），分片集中在一个机房。
+
+## 环境变量一览
+
+| 变量 | 作用 | 默认 |
+|---|---|---|
+| `TOPOLOGY` | 世界与分片地址 JSON | 单分片本机 |
+| `CLUSTER_SECRET` | 内部连接共享密钥 | 开发值（上线务必改） |
+| `TOKEN_SECRET` | 玩家身份 token 签名密钥（固定） | 由 CLUSTER_SECRET 派生 |
+| `GAME` | 游戏模块名或路径 | `soup` |
+| `PORT` / `HOST` | 监听 | 网关 8080/0.0.0.0，分片 9100+id/127.0.0.1 |
+| `SHARD_ID` | 分片编号 | 0 |
+| `MAX_PER_IP` | 单 IP 最大连接数 | 16 |
+| `MAX_CLIENTS` | 单网关最大连接数 | 20000 |
+| `MAX_CHUNKS` | 视野超过多少区块切到概览 LOD | 30 |
+| `TRUST_PROXY` | 信任 `X-Forwarded-For`（在反代/隧道后面必须开） | false |
+| `ALLOWED_ORIGINS` | 允许的网页来源（逗号分隔，空 = 不限） | 空 |
+| `TICK_HZ` / `NET_EVERY` / `KEY_EVERY` | 模拟频率 / 每几 tick 发一帧 / 每几帧一个关键帧 | 20 / 2 / 30 |
+| `FIELD_EVERY` / `FIELD_NET_RES` | 化学场发送间隔(tick) / 发送分辨率 | 20 / 8 |
+| `SHARDS` / `GATEWAYS` / `WORLD` | `launch.js` 单机启动用 | 自动 / 自动 / 24x24 |
+
+## 上线安全清单
+
+- [ ] 设置随机的 `CLUSTER_SECRET`、`TOKEN_SECRET`，并固定 `TOKEN_SECRET`。
+- [ ] 分片端口只在内网；防火墙只开 80/443。
+- [ ] 走 HTTPS/WSS（Caddy/Cloudflare 自动处理）。
+- [ ] 在反代后面开 `TRUST_PROXY=true`，否则单 IP 限制失效或误伤。
+- [ ] 需要时设置 `ALLOWED_ORIGINS=https://你的域名`，防止别的网站嵌入你的服务器。
+- [ ] 聊天：已过滤控制字符、限长限速；如需敏感词过滤，在 `gateway-node.js` 的 `onClientJson` 里加。
+- [ ] 监控：`/healthz`（存活）、网关与分片的 `/metrics`（JSON，可接 Prometheus 的 json exporter）。

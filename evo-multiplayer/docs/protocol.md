@@ -1,0 +1,77 @@
+# 协议
+
+WebSocket，路径 `/ws`。二进制消息第一个字节是类型；文本消息是 JSON。所有多字节整数小端序；`varint` = 无符号 LEB128；`svarint` = zigzag + varint；`str` = varint 长度 + UTF-8。实现见 `src/shared/codec.js` 和 `src/shared/protocol.js`（浏览器、机器人、服务器共用同一份代码）。
+
+## 握手（JSON）
+
+客户端 → `{"t":"hello","name":"阿星","hue":0.33,"token":"<上次 welcome 给的 token，可省>"}`
+
+服务器 → `{"t":"welcome","v":1,"pid":123,"token":"123.xxxx","name":"阿星","hue":0.33,"rgb":…,
+"world":{"chunksX":24,"chunksY":24,"chunkSize":256,"fieldRes":16,"channels":3},
+"posQuant":8,"netHz":10,"maxChunks":30,"viewMargin":96,"cooldowns":{"1":250,…},"gateway":"ab12cd34"}`
+
+10 秒内不发 hello 会被断开。
+
+## 客户端 → 服务器
+
+| 类型 | 名称 | 布局 | 频率建议 |
+|---|---|---|---|
+| 10 | `C_VIEW` | f32 x0, y0, x1, y1（世界坐标视口） | 变化时，≤10/秒 |
+| 11 | `C_ACTION` | u8 工具, f32 x, y, dx, dy | 按冷却 |
+| 12 | `C_CURSOR` | f32 x, y | ≤7/秒 |
+| 13 | `C_PING` | u32 任意值（原样返回） | 1/秒 |
+| JSON | 聊天 | `{"t":"chat","text":"…"}` ≤200 字，1.2 秒一条 | |
+
+工具编号：1 营养、2 播种、3 搅动（dx,dy 为方向）、4 信号素。消息 > 4KB 会被断开连接；超速消息被丢弃，持续超速会被断开。
+
+## 服务器 → 客户端
+
+| 类型 | 名称 | 内容 |
+|---|---|---|
+| 6 | `S_BATCH` | 重复 (varint 长度, 子消息)，同一 tick 的多条消息合并 |
+| 1 | `S_CHUNK` | 区块实体帧（下详） |
+| 2 | `S_FIELD` | varint 区块, u8 res, res×res×通道 个 u8（值 = 2^(q/40) − 1） |
+| 3 | `S_SUMMARY` | varint chunksX, chunksY，然后每区块 u16 人口, u24 主色, u8 营养 |
+| 4 | `S_PONG` | u32 回显 |
+| 5 | `S_EVENTS` | 区块的光标与一次性事件（下详） |
+| JSON | `stats` | `{"t":"stats","online","cells","entities","tidi","top":[[pid,name,count],…]}` 每秒 |
+
+### S_CHUNK
+
+```
+u8 1, varint chunkId, varint frameNo, u8 flags(bit0=关键帧), u32 分片时钟(ms mod 2^32)
+关键帧:  varint n, n × 完整记录
+增量帧:  varint 删除数, 删除 id（升序，逐个差分）
+         varint 新增数, 完整记录…
+         varint 移动数, 移动记录…（按 id 升序）
+完整记录: varint id, u8 kind, u16 qx, u16 qy, u8 r×4, u24 rgb, varint owner, u8 level
+移动记录: varint (id差 << 2 | 标志), svarint dqx, svarint dqy,
+          [u8 r×4 若 标志&1], [u8 level 若 标志&2]
+```
+
+`qx, qy` 为区块内坐标 × posQuant。增量帧只能应用在 `frameNo = 上一帧 + 1` 之上；否则等待下一个关键帧（网关在订阅、积压恢复时会自动补发“关键帧 + 之后的增量”）。
+
+**多区块合并规则**（见 `ClientWorld`）：同一实体可能先后出现在不同区块的流里。以分片时钟较新的信息为准；某区块说“删除”时，只有当它是该实体当前归属时才删除，并记录墓碑时间，比墓碑更旧的信息不再复活该实体。
+
+### S_EVENTS
+
+```
+u8 5, varint chunkId,
+varint 光标数, 每个: varint pid, u16 qx, u16 qy, u24 rgb, str 名字
+varint 事件数, 每个: u8 种类, varint pid, u16 qx, u16 qy,
+    种类 1 聊天: str 名字, str 文本
+    种类 2 工具: u8 工具编号, u24 rgb
+```
+
+光标列表是该区块的**当前全集**（空列表 = 清空）。
+
+## 内部协议（网关 ↔ 分片，分片 ↔ 分片）
+
+同样是 WebSocket。连接后第一条是 `{"t":"hello","role":"gateway|shard","id":…,"secret":CLUSTER_SECRET}`。
+
+- 网关 → 分片 JSON：`sub`/`unsub`（区块列表）、`player`（pid/名字/颜色注册）、`chat`、`online`（该网关在线数，发给 0 号分片汇总）。
+- 网关 → 分片二进制：`I_ACTIONS`(101)、`I_CURSORS`(100)，每 50ms 按分片批量。
+- 分片 → 网关：`S_BATCH` 包着 `S_CHUNK`/`S_FIELD`/`S_EVENTS`/`I_SUMMARY`(102)；JSON `lb`（排行榜/人口/tidi/在线）。
+- 分片 → 分片：`I_GHOST`(111) 每 tick、`I_MIGRATE`(110) 按需。
+
+**内部端口不要暴露到公网**（共享密钥只防误连，不是安全边界）。
