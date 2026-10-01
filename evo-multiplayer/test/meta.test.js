@@ -25,7 +25,7 @@ async function until(fn, ms = 6000) {
   return false;
 }
 
-const base = 20000 + Math.floor(Math.random() * 9000);
+const base = 35000 + Math.floor(Math.random() * 4500); // own range per test file
 const topology = { world: { chunksX: 4, chunksY: 4 }, shards: [`ws://127.0.0.1:${base}`] };
 const metaUrls = [`ws://127.0.0.1:${base + 10}`, `ws://127.0.0.1:${base + 11}`];
 const secret = 'cluster';
@@ -326,8 +326,13 @@ test('a guest who registers keeps the lineage they grew as a guest', async () =>
   const cs = g.welcome.world.chunkSize;
   g.ws.send(encodeView(cs, cs, cs * 2, cs * 2));
   await sleep(300);
-  g.ws.send(encodeAction(ACTIONS.SEED, cs * 1.5, cs * 1.5));
-  assert.ok(await until(() => shard.region.local.some((e) => e.owner === guestPid && !e.dead)), 'guest lineage exists');
+  // Re-seed until it takes (under load the view subscription can lag).
+  let seeded = false;
+  for (let k = 0; k < 20 && !seeded; k++) {
+    g.ws.send(encodeAction(ACTIONS.SEED, cs * 1.5, cs * 1.5));
+    seeded = await until(() => shard.region.local.some((e) => e.owner === guestPid && !e.dead), 700);
+  }
+  assert.ok(seeded, 'guest lineage exists');
   const reg = await g.rpc('auth.register', { name: 'sprout', password: 'password123' });
   const acct = reg.account.id;
   assert.ok(

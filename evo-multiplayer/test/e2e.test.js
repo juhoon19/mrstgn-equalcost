@@ -10,7 +10,7 @@ import { loadGame } from '../src/server/game-loader.js';
 import { POS_QUANT } from '../src/shared/topology.js';
 import { ClientWorld, S_CHUNK, S_EVENTS, ACTIONS, encodeView, encodeAction, encodeCursor, decodeEvents, unpackBatch, TIER_HI, TIER_LO } from '../src/shared/protocol.js';
 
-const base = 20000 + Math.floor(Math.random() * 20000);
+const base = 20000 + Math.floor(Math.random() * 4500); // each test file has its own port range (files run in parallel)
 const topology = {
   world: { chunksX: 6, chunksY: 6 },
   // 2x2 shard grid: exercises edge AND diagonal (corner) handoffs.

@@ -22,7 +22,7 @@ async function until(fn, ms = 5000) {
   return false;
 }
 
-const base = 30000 + Math.floor(Math.random() * 9000);
+const base = 30000 + Math.floor(Math.random() * 4500); // own range per test file
 const topology = { world: { chunksX: 4, chunksY: 4 }, shards: [`ws://127.0.0.1:${base}`, `ws://127.0.0.1:${base + 1}`] };
 const secret = 'cluster';
 const ADMIN = 'let-me-in';

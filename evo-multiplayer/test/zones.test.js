@@ -12,7 +12,7 @@ import { startGateway } from '../src/server/gateway-node.js';
 import { loadGame } from '../src/server/game-loader.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const base = 21000 + Math.floor(Math.random() * 8000);
+const base = 25000 + Math.floor(Math.random() * 4500); // own range per test file
 const topology = { world: { chunksX: 8, chunksY: 4 }, shards: [`ws://127.0.0.1:${base}`, `ws://127.0.0.1:${base + 1}`] };
 const gwPorts = [base + 10, base + 11, base + 12]; // lobby, zone 0, zone 1
 const zones = { cols: 2, rows: 1, urls: [`ws://127.0.0.1:${gwPorts[1]}/ws`, `ws://127.0.0.1:${gwPorts[2]}/ws`] };
