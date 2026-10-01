@@ -399,6 +399,38 @@ export function onAction(region, action, player) {
   }
 }
 
+// ----------------------------------------------------- items (optional)
+// Capture turns one of the player's own organisms into an inventory item
+// (its genome); releasing an item spawns a fresh cell with that genome for
+// whoever releases it. Energy is NOT carried: items hold genes, not food,
+// so trading cannot inject energy into the world.
+
+export function captureEntity(region, e, pid) {
+  if (e.kind !== KIND_CELL || e.owner !== pid || !e.data) return null;
+  const g = e.data.genome;
+  return {
+    game: 'soup',
+    genome: Array.from(g, (v) => Math.round(v * 1e5) / 1e5),
+    hue: Math.round(g[T_HUE] * 1000) / 1000,
+    size: Math.round(g[T_SIZE] * 100) / 100,
+    age: Math.round(e.age || 0),
+  };
+}
+
+export function spawnFromItem(region, data, x, y, pid) {
+  if (!data || data.game !== 'soup' || !Array.isArray(data.genome) || data.genome.length !== GENOME_LEN) return null;
+  const g = Float32Array.from(data.genome, Number);
+  if (!g.every(Number.isFinite)) return null;
+  // Same bounds mutation enforces, so an edited item can't make a monster.
+  const base = baseGenome(region.rng, g[T_HUE]);
+  for (let i = 0; i < GENOME_LEN; i++) if (Math.abs(g[i]) > 50) g[i] = base[i];
+  g[T_SIZE] = Math.max(2.5, Math.min(11, g[T_SIZE]));
+  g[T_DIV] = Math.max(0.6, Math.min(2.5, g[T_DIV]));
+  g[T_MUT] = Math.max(0.005, Math.min(0.3, g[T_MUT]));
+  g[T_HUE] = ((g[T_HUE] % 1) + 1) % 1;
+  return makeCell(region, x, y, g, 30, pid);
+}
+
 // ------------------------------------------------------ migration payload
 
 export function encodeData(e, w) {

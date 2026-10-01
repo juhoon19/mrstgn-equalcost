@@ -3,6 +3,10 @@
 //
 //   node src/launch.js --shards 4 --gateways 2 --port 8080 --world 24x24
 //
+// Accounts/trading/social run in a meta process backed by SQLite at
+// data/meta.db by default; set DATABASE_URL=postgres://... (and --meta N for
+// N replicas) for production, or --meta 0 to run without accounts.
+//
 // For several machines run shard-node.js / gateway-node.js directly with the
 // same TOPOLOGY everywhere (see docs/deploy.md).
 
@@ -46,6 +50,19 @@ function persistentSecrets() {
   }
 }
 const saved = persistentSecrets();
+if (!saved.world) {
+  // Identifies this world in item keys (a wiped world must not collide).
+  saved.world = crypto.randomBytes(6).toString('hex');
+  fs.writeFileSync(path.join(dataDir, 'secrets.json'), JSON.stringify(saved), { mode: 0o600 });
+}
+const databaseUrl = arg('database-url', 'DATABASE_URL', `sqlite:${path.join(dataDir, 'meta.db')}`);
+let metaCount = Number(arg('meta', 'META_REPLICAS', 1));
+if (metaCount > 1 && !databaseUrl.startsWith('postgres')) {
+  console.warn('[launch] several meta replicas need PostgreSQL (DATABASE_URL); using 1');
+  metaCount = 1;
+}
+const metaBase = Number(arg('meta-port', 'META_PORT', 9300));
+const metaUrls = Array.from({ length: metaCount }, (_, i) => `ws://127.0.0.1:${metaBase + i}`);
 const secret = arg('secret', 'CLUSTER_SECRET', saved.cluster);
 const tokenSecret = arg('token-secret', 'TOKEN_SECRET', saved.token);
 
@@ -61,9 +78,26 @@ const env = {
   TOKEN_SECRET: tokenSecret,
   GAME: game,
   DATA_DIR: dataDir,
+  WORLD_ID: arg('world-id', 'WORLD_ID', saved.world),
+  META_URLS: JSON.stringify(metaUrls),
 };
 
 let stopping = false;
+
+const metaChildren = [];
+function startMeta(i) {
+  const child = fork(path.join(HERE, 'meta/meta-node.js'), [], {
+    env: { ...env, META_ID: String(i), PORT: String(metaBase + i), HOST: '127.0.0.1', DATABASE_URL: databaseUrl },
+  });
+  child.on('exit', (code) => {
+    if (stopping) return;
+    console.error(`[launch] meta ${i} exited (${code}); restarting`);
+    setTimeout(() => (metaChildren[i] = startMeta(i)), 1000);
+  });
+  return child;
+}
+for (let i = 0; i < metaCount; i++) metaChildren.push(startMeta(i));
+
 
 function startShard(i) {
   const child = fork(path.join(HERE, 'server/shard-node.js'), [], {
@@ -118,13 +152,14 @@ cluster.on('exit', (worker, code) => {
   cluster.fork(lobbyEnv);
 });
 
-console.log(`[launch] ${shards} shard(s), ${gateways} gateway(s), world ${chunksX}x${chunksY} chunks`);
+console.log(`[launch] ${shards} shard(s), ${gateways} gateway(s), ${metaCount} meta (${databaseUrl.split(':')[0]}), world ${chunksX}x${chunksY} chunks`);
 console.log(`[launch] open http://localhost:${port}  (public: see docs/deploy.md or scripts/tunnel.sh)`);
 
 function shutdown() {
   stopping = true;
   for (const c of children) c.kill('SIGTERM'); // shards save a snapshot first
   for (const c of zoneChildren) c.kill();
+  for (const c of metaChildren) c.kill('SIGTERM');
   for (const w of Object.values(cluster.workers)) w.kill();
   setTimeout(() => process.exit(0), 1500);
 }

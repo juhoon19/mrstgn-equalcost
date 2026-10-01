@@ -49,6 +49,9 @@ import {
 } from '../shared/protocol.js';
 import { hueToRgb } from '../shared/color.js';
 import { Link, readClusterConfig } from './link.js';
+import { MetaClient, MetaError } from '../meta/meta-client.js';
+import { CLIENT_METHODS, ADMIN_METHODS, GUEST_PID_MIN } from '../meta/methods.js';
+import { Moderator } from '../meta/moderation.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
@@ -128,7 +131,7 @@ export async function startGateway(opts = {}) {
     if (typeof token !== 'string') return 0;
     const [p, sig] = token.split('.');
     const pid = Number(p);
-    if (!Number.isInteger(pid) || pid <= 0 || pid >= 2 ** 31 || typeof sig !== 'string') return 0;
+    if (!Number.isInteger(pid) || pid < GUEST_PID_MIN || pid >= 2 ** 31 || typeof sig !== 'string') return 0;
     const good = sign(pid);
     if (sig.length !== good.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return 0;
     return pid;
@@ -261,7 +264,160 @@ export async function startGateway(opts = {}) {
       log(`could not read blocklist ${blocklistFile}: ${err.message}`);
     }
   }
-  const filterChat = (text) => (blockRe ? text.replace(blockRe, (m) => '*'.repeat([...m].length)) : text);
+
+  // World chat goes through the same automatic rules as private messages
+  // (masking, links, contact-info scams, repeats, strikes -> auto-mute).
+  const guestMuted = new Map(); // pid -> until (guests: this gateway only)
+  const moderator = new Moderator({
+    blocklist: blockRe,
+    allowDomains: String(opts.allowDomains ?? cfg.get('allow-domains', 'ALLOW_DOMAINS', ''))
+      .split(',')
+      .map((d) => d.trim())
+      .filter(Boolean),
+    onAutoMute: (pid, until) => {
+      const c = players.get(pid);
+      if (c && c.acct) {
+        c.mutedUntil = until;
+        meta.call('mod.autoMute', { acct: c.acct, until, reasons: 'world-chat' }, { acct: c.acct }).catch(() => {});
+      } else guestMuted.set(pid, until);
+      if (c) send(c, JSON.stringify({ t: 'notice', text: '多次发送违规内容，已被自动禁言 10 分钟。' }));
+    },
+  });
+  const REASON_TEXT = { link: '含外部链接', contact: '含联系方式（只能发给好友）', repeat: '重复刷屏', empty: '空消息' };
+  const reasonText = (rs) => rs.map((r) => REASON_TEXT[r] || r).join('、');
+
+  // ------------------------------------------------------------ meta
+  // Accounts, items, trading, friends and messages live in the meta
+  // service (src/meta). The gateway authenticates the socket once, then
+  // forwards whitelisted calls stamped with the verified account id.
+  const metaUrls = opts.metaUrls ?? JSON.parse(cfg.get('meta-urls', 'META_URLS', '[]'));
+  const conns = new Map(); // conn id -> client
+  let connSeq = 0;
+  const meta = new MetaClient(
+    metaUrls,
+    { t: 'hello', role: 'gateway', id: gwId, secret },
+    {
+      log,
+      // A (re)started replica knows nothing about who is online here.
+      onOpen: (i) => {
+        for (const c of clients) if (c.acct && meta.homeOf(c.acct) === i) meta.send(i, { t: 'online', acct: c.acct, conn: c.conn });
+      },
+      onPush: (conn, ev) => {
+        const c = conns.get(conn);
+        if (!c || !ev) return;
+        if (ev.type === 'muted') c.mutedUntil = Number(ev.until) || 0;
+        send(c, JSON.stringify({ t: 'ev', ev }));
+        if (ev.type === 'banned') c.ws.close(4003, 'banned');
+      },
+    },
+  );
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function metaRetry(m, a, ctx) {
+    for (let k = 0; ; k++) {
+      try {
+        return await meta.call(m, a, ctx);
+      } catch (err) {
+        if (k >= 5 || !['TIMEOUT', 'META_DOWN'].includes(err.code)) throw err;
+        await sleep(500 * 2 ** k);
+      }
+    }
+  }
+
+  // Request/reply with the shard that owns a point (capture, release).
+  const shardPending = new Map();
+  let shardSeq = 0;
+  function shardRequest(shard, msg, timeoutMs = 4000) {
+    return new Promise((resolve) => {
+      const reqId = ++shardSeq;
+      const timer = setTimeout(() => {
+        shardPending.delete(reqId);
+        resolve({ ok: false, code: 'TIMEOUT', msg: '世界服务器超时' });
+      }, timeoutMs);
+      shardPending.set(reqId, { resolve, timer });
+      if (!shardLinks[shard].send(JSON.stringify({ ...msg, reqId }))) {
+        clearTimeout(timer);
+        shardPending.delete(reqId);
+        resolve({ ok: false, code: 'SHARD_DOWN', msg: '世界服务器不可用' });
+      }
+    });
+  }
+
+  function worldPoint(a, c) {
+    const x = Number(a.x);
+    const y = Number(a.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= topo.width || y >= topo.height) {
+      throw new MetaError('BAD_ARG', '位置无效');
+    }
+    const at = topo.chunkAt(x, y);
+    if (!c.chunks.has(skey(at, 0)) && !c.chunks.has(skey(at, 1))) throw new MetaError('NOT_VISIBLE', '只能对视野里的位置操作');
+    return [x, y];
+  }
+
+  // World organism -> inventory item. Order: quota check, shard removes the
+  // organism and returns its data, meta records the item (idempotent key, so
+  // retries are safe). Fails closed: a lost reply costs the organism, never
+  // duplicates an item.
+  async function capture(c, a) {
+    if (!c.acct) throw new MetaError('LOGIN_REQUIRED', '登录后才能收集生物');
+    const [x, y] = worldPoint(a, c);
+    const entityId = Number(a.entityId);
+    if (!Number.isSafeInteger(entityId) || entityId <= 0) throw new MetaError('BAD_ARG', '目标无效');
+    if (!(await meta.call('item.captureAllowed', {}, { acct: c.acct }))) throw new MetaError('LIMIT', '今天的收集次数已用完');
+    const res = await shardRequest(topo.ownerAt(x, y), { t: 'capture', pid: c.pid, entityId, x, y });
+    if (!res.ok) throw new MetaError(res.code, res.msg || '收集失败');
+    return metaRetry('item.captured', { key: res.key, data: res.data }, { acct: c.acct });
+  }
+
+  // Inventory item -> world organism. The item (and fee) is consumed first,
+  // then the owning shard spawns it once per key (retried across moves).
+  async function release(c, a) {
+    if (!c.acct) throw new MetaError('LOGIN_REQUIRED', '请先登录');
+    const [x, y] = worldPoint(a, c);
+    const r = await meta.call('item.release', { item: a.item }, { acct: c.acct });
+    for (let k = 0; k < 6; k++) {
+      const s = await shardRequest(topo.ownerAt(x, y), { t: 'spawn', key: r.spawnKey, pid: c.pid, x, y, data: r.data });
+      if (s.ok) return { item: r.item, entity: s.id ?? 0 };
+      if (s.code === 'BAD_ITEM') break;
+      await sleep(300 * (k + 1));
+    }
+    log(`release ${r.spawnKey} for ${c.acct} could not spawn`);
+    meta.call('admin.note', { action: 'release-failed', target: `acct:${c.acct}`, detail: r.spawnKey }, { superuser: true }).catch(() => {});
+    throw new MetaError('SPAWN_FAILED', '物品已消耗但放回世界失败，已记录，请联系管理员');
+  }
+
+  const registrations = new Map(); // ip -> [t]
+  function rpcReply(c, id, body) {
+    send(c, JSON.stringify({ t: 'rpcr', id, ...body }));
+  }
+  async function onRpc(c, msg) {
+    const id = msg.id;
+    const m = String(msg.m || '');
+    const a = msg.a && typeof msg.a === 'object' && !Array.isArray(msg.a) ? msg.a : {};
+    if (c.rpcTokens <= 0) return rpcReply(c, id, { ok: false, code: 'RATE', msg: '操作太频繁' });
+    c.rpcTokens--;
+    try {
+      let r;
+      if (m === 'item.capture') r = await capture(c, a);
+      else if (m === 'item.release') r = await release(c, a);
+      else {
+        if (!Object.hasOwn(CLIENT_METHODS, m)) throw new MetaError('NO_METHOD', '未知操作');
+        if (CLIENT_METHODS[m] && !c.acct) throw new MetaError('LOGIN_REQUIRED', '请先登录');
+        if (m === 'auth.register') {
+          const now = Date.now();
+          const list = (registrations.get(c.ip) || []).filter((t) => now - t < 3600000);
+          if (list.length >= 5) throw new MetaError('RATE', '这个网络注册太频繁，请稍后再试');
+          list.push(now);
+          registrations.set(c.ip, list);
+          if (registrations.size > 100000) registrations.clear();
+        }
+        const args = m === 'auth.logout' ? { token: c.session } : a;
+        r = await meta.call(m, args, { acct: c.acct, ip: c.ip, ua: c.ua, key: String(a.name ?? '').toLowerCase() });
+      }
+      rpcReply(c, id, { ok: true, r: r ?? null });
+    } catch (err) {
+      rpcReply(c, id, { ok: false, code: err.code || 'INTERNAL', msg: err.code ? err.message : '服务器错误' });
+    }
+  }
 
   // Admin API: HTTP on the gateway, answered by shard 0 over the link.
   let pendingPlayers = [];
@@ -283,48 +439,117 @@ export async function startGateway(opts = {}) {
     });
   }
   const adminFails = new Map(); // ip -> { n, t }
-  function adminAuthorized(req, ip) {
+  const staffCache = new Map(); // session token -> { who, t }
+  const ROLE_RANK = { player: 0, mod: 1, admin: 2 };
+  // Who is calling: ADMIN_TOKEN (superuser), or a staff account's session
+  // token (role mod/admin, checked against meta, cached 30 s), or null.
+  async function adminIdentity(req, ip) {
     const f = adminFails.get(ip);
-    if (f && f.n >= 10 && Date.now() - f.t < 60000) return false; // slow down guessing
+    if (f && f.n >= 10 && Date.now() - f.t < 60000) return null; // slow down guessing
     const got = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    const a = crypto.createHash('sha256').update(got).digest();
-    const b = crypto.createHash('sha256').update(adminToken).digest();
-    const ok = got.length > 0 && crypto.timingSafeEqual(a, b);
-    if (!ok) adminFails.set(ip, { n: (f && Date.now() - f.t < 60000 ? f.n : 0) + 1, t: Date.now() });
-    return ok;
-  }
-  const ADMIN_GET = new Set(['state', 'players']);
-  const ADMIN_POST = new Set(['ban', 'mute', 'kick', 'lift', 'move', 'balance']);
-  function handleAdminHttp(req, res, url) {
-    const json = (code, body) => {
-      res.statusCode = code;
-      res.setHeader('content-type', 'application/json');
-      res.setHeader('cache-control', 'no-store');
-      res.end(JSON.stringify(body));
+    const fail = () => {
+      adminFails.set(ip, { n: (f && Date.now() - f.t < 60000 ? f.n : 0) + 1, t: Date.now() });
+      return null;
     };
-    if (!adminToken) return json(404, { error: 'admin API disabled (set ADMIN_TOKEN)' });
-    if (!adminAuthorized(req, clientIp(req))) return json(401, { error: 'unauthorized' });
-    const op = url.pathname.slice('/admin/api/'.length);
-    if (req.method === 'GET' && ADMIN_GET.has(op)) {
-      adminRequest(op, { q: url.searchParams.get('q') || '' }).then((r) => json(r.ok ? 200 : 502, r.ok ? r.result : { error: r.error }));
-      return;
+    if (!got) return fail();
+    if (adminToken) {
+      const a = crypto.createHash('sha256').update(got).digest();
+      const b = crypto.createHash('sha256').update(adminToken).digest();
+      if (crypto.timingSafeEqual(a, b)) return { superuser: true, role: 'admin', acct: 0, name: 'ADMIN_TOKEN' };
     }
-    if (req.method === 'POST' && ADMIN_POST.has(op)) {
+    if (!meta.enabled || !got.startsWith('S')) return fail();
+    const hit = staffCache.get(got);
+    if (hit && Date.now() - hit.t < 30000) return hit.who;
+    let acct = null;
+    try {
+      acct = await meta.call('auth.resume', { token: got }, { key: got });
+    } catch {
+      return null;
+    }
+    if (!acct || !(ROLE_RANK[acct.role] >= 1)) return fail();
+    const who = { superuser: false, role: acct.role, acct: acct.id, name: acct.name };
+    staffCache.set(got, { who, t: Date.now() });
+    if (staffCache.size > 1000) staffCache.clear();
+    return who;
+  }
+  // World-side operations (answered by shard 0) -> minimum role.
+  const ADMIN_GET = { state: 'mod', players: 'mod' };
+  const ADMIN_POST = { mute: 'mod', kick: 'mod', lift: 'mod', ban: 'admin', move: 'admin', balance: 'admin' };
+  function readBody(req) {
+    return new Promise((resolve) => {
       let body = '';
       req.on('data', (d) => {
         body += d;
         if (body.length > 4096) req.destroy();
       });
       req.on('end', () => {
-        let args;
         try {
-          args = body ? JSON.parse(body) : {};
+          resolve(body ? JSON.parse(body) : {});
         } catch {
-          return json(400, { error: 'bad JSON' });
+          resolve(null);
         }
-        adminRequest(op, args).then((r) => json(r.ok ? 200 : 400, r.ok ? r.result : { error: r.error }));
       });
-      return;
+      req.on('error', () => resolve(null));
+    });
+  }
+  async function handleAdminHttp(req, res, url) {
+    const json = (code, body) => {
+      res.statusCode = code;
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('cache-control', 'no-store');
+      res.end(JSON.stringify(body));
+    };
+    if (!adminToken && !meta.enabled) return json(404, { error: 'admin API disabled (set ADMIN_TOKEN or run the meta service)' });
+    const op = url.pathname.slice('/admin/api/'.length);
+    const ip = clientIp(req);
+    // Staff log in with their game account (password + 2FA if enabled).
+    if (op === 'login' && req.method === 'POST') {
+      if (!meta.enabled) return json(404, { error: 'accounts disabled' });
+      const f = adminFails.get(ip);
+      if (f && f.n >= 10 && Date.now() - f.t < 60000) return json(429, { error: '尝试太多次' });
+      const body = await readBody(req);
+      if (!body) return json(400, { error: 'bad JSON' });
+      try {
+        const r = await meta.call('auth.login', { name: body.name, password: body.password, totp: body.totp }, { key: String(body.name ?? '').toLowerCase(), ip, ua: 'admin' });
+        if (!(ROLE_RANK[r.account.role] >= 1)) {
+          meta.call('auth.logout', { token: r.token }, { acct: r.account.id }).catch(() => {});
+          return json(403, { error: '这个账号不是管理人员' });
+        }
+        return json(200, { token: r.token, account: r.account });
+      } catch (err) {
+        return json(401, { error: err.message, code: err.code });
+      }
+    }
+    const who = await adminIdentity(req, ip);
+    if (!who) return json(401, { error: 'unauthorized' });
+    if (op === 'whoami') return json(200, { role: who.role, name: who.name, superuser: who.superuser, meta: meta.enabled });
+    const ctx = { acct: who.acct, superuser: who.superuser };
+    if (op.startsWith('meta/')) {
+      const name = op.slice(5);
+      const spec = Object.hasOwn(ADMIN_METHODS, name) ? ADMIN_METHODS[name] : null;
+      if (!spec || spec.method !== req.method) return json(404, { error: 'unknown admin endpoint' });
+      if (ROLE_RANK[who.role] < ROLE_RANK[spec.role]) return json(403, { error: '权限不足' });
+      const args = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readBody(req);
+      if (!args) return json(400, { error: 'bad JSON' });
+      try {
+        return json(200, (await meta.call(`admin.${name}`, args, ctx)) ?? {});
+      } catch (err) {
+        return json(err.code === 'FORBIDDEN' ? 403 : 400, { error: err.message, code: err.code });
+      }
+    }
+    if (req.method === 'GET' && Object.hasOwn(ADMIN_GET, op)) {
+      if (ROLE_RANK[who.role] < ROLE_RANK[ADMIN_GET[op]]) return json(403, { error: '权限不足' });
+      const r = await adminRequest(op, { q: url.searchParams.get('q') || '' });
+      return json(r.ok ? 200 : 502, r.ok ? r.result : { error: r.error });
+    }
+    if (req.method === 'POST' && Object.hasOwn(ADMIN_POST, op)) {
+      if (ROLE_RANK[who.role] < ROLE_RANK[ADMIN_POST[op]]) return json(403, { error: '权限不足' });
+      const args = await readBody(req);
+      if (!args) return json(400, { error: 'bad JSON' });
+      const r = await adminRequest(op, args);
+      // Every staff action lands in the audit log (who, what, to whom).
+      if (r.ok && meta.enabled) meta.call('admin.note', { action: op, target: args.pid ?? args.chunk ?? '', detail: args }, ctx).catch(() => {});
+      return json(r.ok ? 200 : 400, r.ok ? r.result : { error: r.error });
     }
     return json(404, { error: 'unknown admin endpoint' });
   }
@@ -346,7 +571,14 @@ export async function startGateway(opts = {}) {
       }
       else if (msg.t === 'sanctions') applySanctions(msg.list);
       else if (msg.t === 'kick') for (const pid of msg.pids || []) players.get(pid)?.ws.close(4001, 'kicked');
-      else if (msg.t === 'adminr') {
+      else if (msg.t === 'capr' || msg.t === 'spawnr') {
+        const p = shardPending.get(msg.reqId);
+        if (p) {
+          shardPending.delete(msg.reqId);
+          clearTimeout(p.timer);
+          p.resolve(msg);
+        }
+      } else if (msg.t === 'adminr') {
         const p = adminPending.get(msg.id);
         if (p) {
           adminPending.delete(msg.id);
@@ -576,29 +808,64 @@ export async function startGateway(opts = {}) {
       const now = Date.now();
       if (now - c.lastChat < 1200) return;
       c.lastChat = now;
-      const text = filterChat(cleanText(msg.text, 200));
-      if (!text) return;
-      if (mutedPids.has(c.pid) && live(mutedPids.get(c.pid))) {
+      const raw = cleanText(msg.text, 200);
+      if (!raw) return;
+      if ((mutedPids.has(c.pid) && live(mutedPids.get(c.pid))) || c.mutedUntil > now || (guestMuted.get(c.pid) || 0) > now) {
         send(c, JSON.stringify({ t: 'notice', text: '你已被禁言，消息未发送。' }));
         return;
       }
+      const mod = moderator.check(raw, { account: c.pid, channel: 'world', toFriend: false });
+      if (!mod.ok) {
+        send(c, JSON.stringify({ t: 'notice', text: `消息未发送：${reasonText(mod.reasons)}` }));
+        return;
+      }
+      const text = mod.text;
       const [x, y] = c.cursor || (c.view ? [(c.view[0] + c.view[2]) / 2, (c.view[1] + c.view[3]) / 2] : [0, 0]);
       const cx = Math.max(0, Math.min(topo.width - 1, x));
       const cy = Math.max(0, Math.min(topo.height - 1, y));
       shardLinks[topo.ownerAt(cx, cy)].send(JSON.stringify({ t: 'chat', pid: c.pid, x: cx, y: cy, text }));
-    }
+    } else if (msg.t === 'rpc') onRpc(c, msg);
   }
 
-  function onHello(c, msg) {
-    let pid = readToken(msg.token);
-    if (pid && isBanned(pid, c.ipHash)) {
-      c.ws.close(4003, 'banned');
-      return;
+  async function onHello(c, msg) {
+    // A logged-in player's world identity is their account id; guests get
+    // a signed random id in the guest range (see readToken).
+    let account = null;
+    if (typeof msg.session === 'string' && msg.session && meta.enabled) {
+      c.helloing = true;
+      try {
+        account = await meta.call('auth.resume', { token: msg.session }, { key: msg.session });
+      } catch (err) {
+        if (err.code === 'BANNED') return c.ws.close(4003, 'banned');
+        send(c, JSON.stringify({ t: 'notice', text: '账号服务暂时不可用，先以游客身份进入。' }));
+      }
+      c.helloing = false;
+      if (c.ws.readyState !== 1) return;
+      if (!account) send(c, JSON.stringify({ t: 'ev', ev: { type: 'session-expired' } }));
     }
-    if (!pid || players.has(pid)) {
-      // New identity (or the same token open twice: give the second tab its own id).
-      do pid = crypto.randomInt(1, 2 ** 31);
-      while (players.has(pid));
+    let pid;
+    if (account) {
+      pid = account.id;
+      if (isBanned(pid, c.ipHash)) return c.ws.close(4003, 'banned');
+      // The same account opened again on this gateway: newest tab wins.
+      const old = players.get(pid);
+      if (old) {
+        players.delete(pid);
+        old.ws.close(4004, 'replaced');
+      }
+      c.acct = account.id;
+      c.session = msg.session;
+      c.mutedUntil = Number(account.mutedUntil) || 0;
+      msg = { ...msg, name: account.name, hue: account.hue };
+      meta.send(meta.homeOf(c.acct), { t: 'online', acct: c.acct, conn: c.conn });
+    } else {
+      pid = readToken(msg.token);
+      if (pid && isBanned(pid, c.ipHash)) return c.ws.close(4003, 'banned');
+      if (!pid || players.has(pid)) {
+        // New identity (or the same token open twice: give the second tab its own id).
+        do pid = crypto.randomInt(GUEST_PID_MIN, 2 ** 31);
+        while (players.has(pid));
+      }
     }
     c.pid = pid;
     c.name = cleanText(msg.name, 24) || `cell-${pid % 10000}`;
@@ -629,6 +896,8 @@ export async function startGateway(opts = {}) {
         gateway: gwId,
         zones,
         zone: myZone,
+        account,
+        meta: meta.enabled,
       }),
     );
   }
@@ -658,7 +927,11 @@ export async function startGateway(opts = {}) {
       return;
     }
     if (url.pathname.startsWith('/admin/api/')) {
-      handleAdminHttp(req, res, url);
+      handleAdminHttp(req, res, url).catch((err) => {
+        log("admin request failed", err.message);
+        if (!res.headersSent) res.statusCode = 500;
+        res.end();
+      });
       return;
     }
     if (url.pathname === '/metrics') {
@@ -722,7 +995,7 @@ export async function startGateway(opts = {}) {
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, ip));
+    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, ip, String(req.headers['user-agent'] || '').slice(0, 120)));
   });
 
   // Behind a proxy the TCP peer is the proxy. IP_HEADER names a header the
@@ -743,11 +1016,18 @@ export async function startGateway(opts = {}) {
     return parts.length >= proxyHops ? parts[parts.length - proxyHops] : peer;
   }
 
-  function onConnection(ws, ip) {
+  function onConnection(ws, ip, ua = '') {
     perIp.set(ip, (perIp.get(ip) || 0) + 1);
     const c = {
       ws,
       ip,
+      ua,
+      conn: ++connSeq,
+      acct: 0,
+      session: '',
+      mutedUntil: 0,
+      helloing: false,
+      rpcTokens: 20,
       ipHash: ipHashOf(ip),
       pid: 0,
       name: '',
@@ -771,6 +1051,7 @@ export async function startGateway(opts = {}) {
       queued: 0,
     };
     clients.add(c);
+    conns.set(c.conn, c);
     const helloTimer = setTimeout(() => {
       if (!c.pid) ws.close(1008, 'hello timeout');
     }, 10000);
@@ -783,7 +1064,7 @@ export async function startGateway(opts = {}) {
       c.tokens--;
       try {
         if (!c.pid) {
-          if (isBinary) return;
+          if (isBinary || c.helloing) return;
           const msg = JSON.parse(data.toString());
           if (msg.t === 'hello') {
             clearTimeout(helloTimer);
@@ -806,6 +1087,8 @@ export async function startGateway(opts = {}) {
       else perIp.set(ip, n);
       for (const id of [...c.chunks.keys()]) unsubscribe(c, id);
       if (c.pid && players.get(c.pid) === c) players.delete(c.pid);
+      conns.delete(c.conn);
+      if (c.acct) meta.send(meta.homeOf(c.acct), { t: 'offline', conn: c.conn });
       if (c.cursorShard >= 0) cursorBatch[c.cursorShard].set(c.pid, [NaN, NaN]);
     });
     ws.on('error', () => {});
@@ -815,6 +1098,7 @@ export async function startGateway(opts = {}) {
   const flushTimer = setInterval(() => {
     for (const c of clients) {
       c.tokens = Math.min(200, c.tokens + 5);
+      c.rpcTokens = Math.min(20, c.rpcTokens + 0.25); // 5 calls/s sustained
       c.replayTokens = Math.min(REPLAY_BURST, c.replayTokens + REPLAY_RATE / 20);
       if (c.pendingView && Date.now() - c.lastViewAt >= 100) applyView(c, Date.now());
       if (c.cursorDirty && c.pid) {
@@ -996,6 +1280,8 @@ export async function startGateway(opts = {}) {
       players: players.size,
       watchedChunks: chunkState.size,
       shards: shardLinks.map((l, i) => ({ shard: i, open: l.open })), // no internal addresses
+      meta: meta.links.map((l, i) => ({ replica: i, open: l.open })),
+      accounts: [...clients].filter((c) => c.acct).length,
       resyncs: counters.resyncs,
       dropped: counters.dropped,
       ...rates,
@@ -1014,6 +1300,7 @@ export async function startGateway(opts = {}) {
       clearInterval(secondTimer);
       clearInterval(heartbeatTimer);
       for (const l of shardLinks) l.close();
+      meta.close();
       for (const c of clients) c.ws.terminate();
       wss.close();
       server.close();

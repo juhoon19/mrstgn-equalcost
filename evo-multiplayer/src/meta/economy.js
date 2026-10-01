@@ -272,6 +272,13 @@ export class Economy {
     if (typeof sourceKey !== 'string' || !sourceKey.startsWith('cap:')) throw new AppError('BAD_ARG', 'bad source key');
     return this.store.tx(async (t) => {
       const r = await createItem(t, { owner: acct, kind: 'specimen', data, sourceKey });
+      if (!r.created) {
+        // Same organism again (a retried request, or a shard that crashed
+        // before its snapshot resurrected it): never a second item, and
+        // never someone else's existing one.
+        const ex = await t.query('SELECT 1 FROM item_log WHERE item = $1 AND action = $2 AND to_acct = $3', [r.id, 'create', acct]);
+        if (!ex.rows.length) throw new AppError('ALREADY_CAPTURED', '这个生物已经被收集过了');
+      }
       return { item: r.id, created: r.created };
     });
   }

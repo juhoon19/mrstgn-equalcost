@@ -19,6 +19,8 @@ import { encodeChunkFrame, encodeField, encodeEvents } from './snapshot.js';
 import { loadGame } from './game-loader.js';
 import { Coordinator } from './coordinator.js';
 import { Control } from './control.js';
+import { MetaClient } from '../meta/meta-client.js';
+import { GUEST_PID_MIN } from '../meta/methods.js';
 
 export async function startShard(opts = {}) {
   const cfg = readClusterConfig();
@@ -90,6 +92,73 @@ export async function startShard(opts = {}) {
     fs.renameSync(`${snapFile}.tmp`, snapFile);
   }
   const snapTimer = snapFile ? setInterval(saveSnapshot, snapshotEvery) : null;
+
+  // ------------------------------------------------- items & rewards
+  // WORLD_ID makes capture keys unique per world (a wiped world restarts
+  // entity ids; old items must not collide with new organisms).
+  const worldId = String(opts.worldId ?? cfg.get('world-id', 'WORLD_ID', 'w0'));
+  const metaUrls = opts.metaUrls ?? JSON.parse(cfg.get('meta-urls', 'META_URLS', '[]'));
+  const rewardCap = Number(opts.rewardCap ?? cfg.get('reward-cap', 'REWARD_CAP', 3));
+  const rewardEvery = Number(opts.rewardEvery ?? cfg.get('reward-every', 'REWARD_EVERY', 60)) * 1000;
+  const meta = metaUrls.length ? new MetaClient(metaUrls, { t: 'hello', role: 'shard', id: shardId, secret }, { log }) : null;
+  // Once a minute each account earns floor(sqrt(living descendants)) coins
+  // per shard (capped): playing well pays a little, farming pays little more.
+  // Keys are per (period, shard, account) so a retry never pays twice.
+  const rewardTimer =
+    meta && rewardCap > 0
+      ? setInterval(() => {
+          const counts = new Map();
+          for (const e of region.local) {
+            if (e.dead || !(e.owner > 0) || e.owner >= GUEST_PID_MIN) continue;
+            counts.set(e.owner, (counts.get(e.owner) || 0) + 1);
+          }
+          const entries = [];
+          for (const [acct, n] of counts) entries.push([acct, Math.min(rewardCap, Math.floor(Math.sqrt(n)))]);
+          if (!entries.length) return;
+          const period = Math.floor(Date.now() / rewardEvery);
+          const i = meta.pick(shardId % meta.size);
+          if (i >= 0) meta.send(i, { t: 'reward', key: `life:${worldId}:${period}:${shardId}`, entries });
+        }, rewardEvery)
+      : null;
+  // Spawn keys already applied (a gateway may retry a release).
+  const spawned = new Map();
+
+  function findEntity(id, x, y) {
+    let found = null;
+    region.near(x, y, 64, (e) => {
+      if (e.id === id && !e.ghost && !e.dead) found = e;
+    });
+    if (!found) for (const e of region.local) if (e.id === id && !e.dead) found = e;
+    return found;
+  }
+
+  function handleCapture(ws, msg) {
+    const reply = (r) => ws.readyState === 1 && ws.send(JSON.stringify({ t: 'capr', reqId: msg.reqId, ...r }));
+    if (!game.captureEntity) return reply({ ok: false, code: 'UNSUPPORTED', msg: '这个游戏不支持收集' });
+    const x = Number(msg.x);
+    const y = Number(msg.y);
+    if (!Number.isFinite(x) || !region.ownsPoint(x, y)) return reply({ ok: false, code: 'MOVED', msg: '目标不在这个分片' });
+    const e = findEntity(Number(msg.entityId), x, y);
+    if (!e) return reply({ ok: false, code: 'GONE', msg: '目标已经不在了' });
+    const data = game.captureEntity(region, e, Number(msg.pid));
+    if (!data) return reply({ ok: false, code: 'NOT_YOURS', msg: '只能收集你自己谱系的生物' });
+    region.kill(e);
+    reply({ ok: true, key: `cap:${worldId}:${e.id}`, data });
+  }
+
+  function handleSpawn(ws, msg) {
+    const reply = (r) => ws.readyState === 1 && ws.send(JSON.stringify({ t: 'spawnr', reqId: msg.reqId, ...r }));
+    const x = Number(msg.x);
+    const y = Number(msg.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !region.ownsPoint(x, y)) return reply({ ok: false, code: 'MOVED' });
+    const key = String(msg.key);
+    if (spawned.has(key)) return reply({ ok: true, dup: true });
+    const e = game.spawnFromItem ? game.spawnFromItem(region, msg.data, x, y, Number(msg.pid)) : null;
+    if (!e) return reply({ ok: false, code: 'BAD_ITEM', msg: '这个物品无法放回世界' });
+    spawned.set(key, Date.now());
+    if (spawned.size > 10000) for (const [k] of spawned) if (spawned.size > 5000) spawned.delete(k);
+    reply({ ok: true, id: e.id });
+  }
 
   // ------------------------------------------------------------ gateways
   const gateways = new Map(); // ws -> { id, bytesOut }
@@ -237,6 +306,12 @@ export async function startShard(opts = {}) {
         break;
       case 'online':
         onlineByGateway.set(msg.gw, { n: msg.n, t: Date.now() });
+        break;
+      case 'capture':
+        handleCapture(ws, msg);
+        break;
+      case 'spawn':
+        handleSpawn(ws, msg);
         break;
     }
   }
@@ -905,6 +980,8 @@ export async function startShard(opts = {}) {
     close() {
       stopped = true;
       if (snapTimer) clearInterval(snapTimer);
+      if (rewardTimer) clearInterval(rewardTimer);
+      if (meta) meta.close();
       for (const l of peerLinks.values()) l.close();
       for (const ws of wss.clients) ws.terminate();
       wss.close();

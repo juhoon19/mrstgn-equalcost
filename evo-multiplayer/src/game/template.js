@@ -97,6 +97,18 @@ export function onAction(region, action, player) {
   }
 }
 
+// Optional: inventory items. Return plain JSON from captureEntity (or null
+// to refuse); spawnFromItem gets it back (from the database - validate it).
+export function captureEntity(region, e, pid) {
+  if (e.owner !== pid) return null;
+  return { game: 'template', hue: e.data ? e.data.hue : 0 };
+}
+
+export function spawnFromItem(region, data, x, y, pid) {
+  if (!data || data.game !== 'template' || !Number.isFinite(data.hue)) return null;
+  return spawnParticle(region, x, y, pid, ((data.hue % 1) + 1) % 1);
+}
+
 // Migration / snapshot payload for entity.data.
 export function encodeData(e, w) {
   w.f32(e.data ? e.data.hue : 0).f32(e.data ? e.data.spin : 0);
