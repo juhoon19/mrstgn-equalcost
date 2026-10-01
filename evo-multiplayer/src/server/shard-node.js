@@ -120,6 +120,33 @@ export async function startShard(opts = {}) {
           if (i >= 0) meta.send(i, { t: 'reward', key: `life:${worldId}:${period}:${shardId}`, entries });
         }, rewardEvery)
       : null;
+  // Lineage adoption: a guest who registers or logs in keeps their
+  // descendants (owner guest pid -> account id). Entities migrating at that
+  // moment are caught by the remap table for a while.
+  const ownerRemap = new Map(); // from -> { to, t }
+  function remapOwner(e) {
+    const r = ownerRemap.get(e.owner);
+    if (r) e.owner = r.to;
+  }
+  function handleAdoptLineage(msg) {
+    const from = Number(msg.from);
+    const to = Number(msg.to);
+    if (!(from >= GUEST_PID_MIN) || !(to > 0) || to >= GUEST_PID_MIN) return;
+    ownerRemap.set(from, { to, t: Date.now() });
+    for (const [k, v] of ownerRemap) if (Date.now() - v.t > 120000) ownerRemap.delete(k);
+    let n = 0;
+    for (const chunk of region.chunks.values()) {
+      for (const e of chunk.entities) {
+        if (e.owner === from) {
+          e.owner = to;
+          n++;
+        }
+      }
+    }
+    for (const e of region.pendingSpawns) if (e.owner === from) e.owner = to;
+    if (n) log(`lineage ${from} -> account ${to}: ${n} organisms`);
+  }
+
   // Spawn keys already applied (a gateway may retry a release).
   const spawned = new Map();
 
@@ -312,6 +339,9 @@ export async function startShard(opts = {}) {
         break;
       case 'spawn':
         handleSpawn(ws, msg);
+        break;
+      case 'adopt':
+        handleAdoptLineage(msg);
         break;
     }
   }
@@ -529,6 +559,7 @@ export async function startShard(opts = {}) {
       seen.add(seq);
       if (!region.chunks.has(chunk.id)) {
         topo.owner[chunk.id] = shardId;
+        if (ownerRemap.size) for (const e of chunk.entities) remapOwner(e);
         region.addChunk(chunk);
         chunksIn++;
         applyPendingSubs(chunk.id);
@@ -684,6 +715,7 @@ export async function startShard(opts = {}) {
         seen.add(seq);
         if (seen.size > 4096) seen.delete(seen.values().next().value);
         migratedIn += entities.length;
+        if (ownerRemap.size) for (const e of entities) remapOwner(e);
         region.adopt(entities);
       }
       if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'mack', seq }));

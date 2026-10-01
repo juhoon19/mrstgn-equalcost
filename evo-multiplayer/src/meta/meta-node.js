@@ -88,6 +88,11 @@ export async function startMeta(opts = {}) {
           const mine = [...conns.keys()];
           for (let k = 0; k < mine.length; k += 5000) l.send(JSON.stringify({ t: 'presence', accts: mine.slice(k, k + 5000), online: true }));
         },
+        // A dead peer can't send "offline" for its accounts: forget them
+        // until it is back (it re-announces who is really online).
+        onClose: () => {
+          for (const a of [...online]) if (home(a) === r) online.delete(a);
+        },
       }),
     );
   }
@@ -299,7 +304,11 @@ export async function startMeta(opts = {}) {
       await social.audit(who.id, 'set-role', `acct:${a.id}`, a.role);
     },
     'admin.audit': async (a, x) => (await requireRole(x.acct, ['mod', 'admin'], x.superuser)) && social.auditLog(),
-    'admin.economy': async (a, x) => (await requireRole(x.acct, ['mod', 'admin'], x.superuser)) && economy.stats(),
+    'admin.economy': async (a, x) => {
+      await requireRole(x.acct, ['mod', 'admin'], x.superuser);
+      const peersUp = [...peers.values()].filter((l) => l.open).length;
+      return { ...(await economy.stats()), accountsOnline: online.size, replicas: M, replicasUp: peersUp + 1 };
+    },
     // Gateways record world-side staff actions (bans, kicks, moves) here.
     'admin.note': async (a, x) => {
       const who = await requireRole(x.acct, ['mod', 'admin'], x.superuser);

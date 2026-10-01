@@ -1,6 +1,7 @@
 # Fly.io, all-in-one on one machine (shards + gateways as processes).
 #   fly launch --config deploy/fly.toml --copy-config --no-deploy
-#   fly secrets set CLUSTER_SECRET=$(openssl rand -hex 16) TOKEN_SECRET=$(openssl rand -hex 16)
+#   fly volumes create evo_data --size 3 --region hkg     (world snapshots + accounts DB live here)
+#   fly secrets set CLUSTER_SECRET=$(openssl rand -hex 16) TOKEN_SECRET=$(openssl rand -hex 16) ADMIN_TOKEN=$(openssl rand -hex 24)
 #   fly deploy --config deploy/fly.toml      (run from the project root)
 app = "evo-soup"
 primary_region = "hkg"
@@ -15,6 +16,11 @@ primary_region = "hkg"
   WORLD = "24x24"
   TRUST_PROXY = "true"
   QUIET = "true"
+
+# Without a volume every deploy would wipe the world AND every player account.
+[mounts]
+  source = "evo_data"
+  destination = "/data"
 
 [http_service]
   internal_port = 8080

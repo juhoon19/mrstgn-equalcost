@@ -89,6 +89,7 @@ export function initSocial(api) {
   $('drawer-close').addEventListener('click', () => open(null));
 
   function open(k) {
+    if (holdRender && k !== 'account') return; // finish saving the codes first
     tab = k;
     drawer.classList.toggle('hidden', !k);
     for (const key of Object.keys(TABS)) $(`sb-${key}`)?.classList.toggle('active', key === k);
@@ -97,8 +98,11 @@ export function initSocial(api) {
   }
 
   let renderSeq = 0;
+  // Set while a one-time screen (recovery codes) is showing: nothing may
+  // replace it until the player confirms (zone handovers re-send welcome).
+  let holdRender = false;
   async function render() {
-    if (!tab) return;
+    if (!tab || holdRender) return;
     const mySeq = ++renderSeq;
     const title = $('drawer-title');
     title.textContent = dmWith ? `与 ${dmWith.name} 的私信` : TABS[tab];
@@ -214,11 +218,15 @@ export function initSocial(api) {
     }, false);
     const register = act(async () => {
       const r = await rpc('auth.register', { name: name.value.trim(), password: pw.value, hue: Number(api.store.get('hue', 0)) / 360 });
+      holdRender = true;
       body.replaceChildren(
         el('h4', {}, '注册成功！请保存恢复码'),
         el('p', { class: 'muted' }, '忘记密码时，每个恢复码可以用一次来重置密码。它们只显示这一次：'),
         el('pre', { class: 'secret' }, r.recoveryCodes.join('\n')),
-        btn('我已保存，进入游戏', () => loggedInWith(r.token), 'primary'),
+        btn('我已保存，进入游戏', () => {
+          holdRender = false;
+          loggedInWith(r.token);
+        }, 'primary'),
       );
     }, false);
     pw.addEventListener('keydown', (e) => e.key === 'Enter' && login());
@@ -236,6 +244,7 @@ export function initSocial(api) {
 
   function loggedInWith(token) {
     api.store.set('session', token);
+    if (!loggedIn()) toast('已登录：你作为游客时培育的后代已归入这个账号', 'ok');
     api.relogin();
   }
   function logoutLocal() {
@@ -517,7 +526,23 @@ export function initSocial(api) {
   }
 
   // --------------------------------------------------------------- events
+  // Pushes can arrive in bursts (many friends logging in): coalesce the
+  // re-renders they cause so the panel doesn't exceed the call rate limit.
+  let renderTimer = null;
+  function renderSoon() {
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(render, 300);
+  }
+
+  // During a zone handover both connections are registered for a moment and
+  // the same push can arrive twice: drop exact repeats within a few seconds.
+  const recentEvents = new Map(); // json -> t
   function onEvent(ev) {
+    const key = JSON.stringify(ev);
+    const now = Date.now();
+    if (now - (recentEvents.get(key) || 0) < 5000) return;
+    recentEvents.set(key, now);
+    if (recentEvents.size > 200) for (const [k, t] of recentEvents) if (now - t > 5000) recentEvents.delete(k);
     switch (ev.type) {
       case 'dm': {
         const m = ev.msg;
@@ -540,10 +565,10 @@ export function initSocial(api) {
       case 'friend':
         if (ev.status === 'incoming') toast(`👥 ${ev.name} 想加你为好友`);
         else if (ev.status === 'accepted') toast(`👥 你和 ${ev.name} 成为了好友`, 'ok');
-        if (tab === 'friends' && !dmWith) render();
+        if (tab === 'friends' && !dmWith) renderSoon();
         break;
       case 'presence':
-        if (tab === 'friends' && !dmWith) render();
+        if (tab === 'friends' && !dmWith) renderSoon();
         break;
       case 'trade': {
         const t = ev.trade;
@@ -552,12 +577,12 @@ export function initSocial(api) {
         else if (t.status === 'cancelled') toast(`与 ${other} 的交易已取消`);
         else if (tab !== 'trade') toast(`🤝 ${other} 的交易有更新`);
         if (t.status !== 'open') tradeDraft.delete(t.id);
-        if (tab === 'trade' || tab === 'bag') render();
+        if (tab === 'trade' || tab === 'bag') renderSoon();
         break;
       }
       case 'sold':
         toast(`🪙 你的挂单以 ${ev.price} 售出（手续费 ${ev.fee}）`, 'ok');
-        if (tab === 'bag' || tab === 'market') render();
+        if (tab === 'bag' || tab === 'market') renderSoon();
         break;
       case 'muted':
         if (me()) me().mutedUntil = ev.until;
@@ -574,9 +599,14 @@ export function initSocial(api) {
   }
 
   async function onWelcome(msg) {
+    const sameAccount = welcome && (welcome.account?.id ?? 0) === (msg.account?.id ?? 0);
     welcome = msg;
+    // Server without the account system: hide everything that needs it.
+    $('social').classList.toggle('hidden', msg.meta === false);
+    document.querySelector('#tools [data-tool="capture"]')?.classList.toggle('hidden', msg.meta === false);
     $('sb-account').querySelector('span').textContent = msg.account ? msg.account.name : '登录';
     for (const k of ['bag', 'trade', 'friends']) $(`sb-${k}`)?.classList.toggle('dim', !msg.account);
+    if (sameAccount) return; // zone handover: same person, nothing to reload
     if (tab) render();
     if (msg.account) {
       try {
@@ -602,5 +632,5 @@ export function initSocial(api) {
     else p.reject(Object.assign(new Error(msg.msg || msg.code), { code: msg.code }));
   }
 
-  return { onEvent, onWelcome, onRpcReply, onMapClick, cancelRelease, open, toast };
+  return { onEvent, onWelcome, onRpcReply, onMapClick, cancelRelease, open, toast, busy: () => pending.size > 0 };
 }

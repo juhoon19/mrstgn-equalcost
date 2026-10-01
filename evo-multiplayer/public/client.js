@@ -234,7 +234,17 @@ function finishZoneSwitch(sw) {
   fieldImages.clear();
   cursors.clear();
   viewDirty = true;
-  old.close(1000, 'zone handover');
+  // Calls sent on the old connection (e.g. a registration) still get their
+  // replies: keep it open, text only, until they are answered (max 10 s).
+  old.onmessage = (ev) => {
+    if (typeof ev.data === 'string') onMessage(ev.data);
+  };
+  const t0 = performance.now();
+  const retire = () => {
+    if (social.busy() && performance.now() - t0 < 10000) setTimeout(retire, 200);
+    else old.close(1000, 'zone handover');
+  };
+  retire();
   setStatus(`在线 · ${welcome.zone + 1} 区`);
 }
 

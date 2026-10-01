@@ -45,7 +45,7 @@ before(async () => {
   metas = await Promise.all(metaUrls.map((u, i) => startMeta({ id: i, urls: metaUrls, port: base + 10 + i, secret, store, quiet: true })));
   const game = await loadGame('soup');
   shard = await startShard({ shard: 0, port: base, topology, secret, game, quiet: true, balance: false, metaUrls, worldId: 'test', rewardEvery: 0.5, rewardCap: 3 });
-  const g = () => startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, adminToken: ADMIN, maxPerIp: 100, metaUrls });
+  const g = () => startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, adminToken: ADMIN, maxPerIp: 100, metaUrls, registerPerHour: 1000 });
   gw1 = await g();
   gw2 = await g();
   await sleep(400);
@@ -315,4 +315,114 @@ test('staff accounts: login, roles, sanctions reach live sockets, audit trail', 
   again.close();
   mod.close();
   alice.close();
+});
+
+// ------------------------------------------------------ integration seams
+
+test('a guest who registers keeps the lineage they grew as a guest', async () => {
+  const g = client(gw1, { name: 'sprout' });
+  await g.ready();
+  const guestPid = g.welcome.pid;
+  const cs = g.welcome.world.chunkSize;
+  g.ws.send(encodeView(cs, cs, cs * 2, cs * 2));
+  await sleep(300);
+  g.ws.send(encodeAction(ACTIONS.SEED, cs * 1.5, cs * 1.5));
+  assert.ok(await until(() => shard.region.local.some((e) => e.owner === guestPid && !e.dead)), 'guest lineage exists');
+  const reg = await g.rpc('auth.register', { name: 'sprout', password: 'password123' });
+  const acct = reg.account.id;
+  assert.ok(
+    await until(() => shard.region.local.some((e) => e.owner === acct && !e.dead) && !shard.region.local.some((e) => e.owner === guestPid && !e.dead)),
+    'lineage now belongs to the account',
+  );
+  g.close();
+  const s = client(gw2, { session: reg.token });
+  await s.ready();
+  assert.equal(s.welcome.pid, acct);
+  // ...so the account can capture what it grew as a guest.
+  const cell = shard.region.local.find((e) => e.owner === acct && e.kind === 1 && !e.dead);
+  s.ws.send(encodeView(cs, cs, cs * 2, cs * 2));
+  await sleep(300);
+  if (cell) {
+    const r = await s.rpc('item.capture', { entityId: cell.id, x: cell.x, y: cell.y }).catch((err) => err);
+    assert.ok(r.item > 0 || r.code === 'GONE', `capture after adoption: ${r.code || 'ok'}`);
+  }
+  s.close();
+});
+
+test('zone handover: one account on two gateways at once keeps presence and delivery', async () => {
+  const dave = await account(gw1, 'dave');
+  const erin = await account(gw2, 'erin');
+  await dave.rpc('friends.request', { name: 'erin' });
+  await erin.rpc('friends.request', { name: 'dave' }); // mutual request = accepted
+  // Make-before-break: dave opens the new zone's gateway, then closes the old.
+  const dave2 = client(gw2, { session: dave.reg.token });
+  await dave2.ready();
+  assert.equal(dave2.welcome.pid, dave.welcome.pid);
+  erin.events.length = 0;
+  dave.close();
+  await sleep(400);
+  assert.ok(!erin.events.some((e) => e.type === 'presence' && e.online === false), 'no false "offline" during handover');
+  assert.equal((await erin.rpc('friends.list'))[0].online, true);
+  await erin.rpc('dm.send', { to: dave.welcome.pid, text: 'still there?' });
+  assert.ok(await until(() => dave2.events.some((e) => e.type === 'dm' && e.msg.text === 'still there?')), 'DM reaches the new connection');
+  dave2.close();
+  assert.ok(await until(() => erin.events.some((e) => e.type === 'presence' && e.online === false)), 'offline once the last connection closes');
+  erin.close();
+});
+
+test('world-side mute/ban from the chat log also sanction the account', async () => {
+  const fay = await account(gw1, 'fay');
+  const gus = await account(gw2, 'gus');
+  const H = { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' };
+  const r = await fetch(`http://127.0.0.1:${gw1.port}/admin/api/mute`, { method: 'POST', headers: H, body: JSON.stringify({ pid: fay.welcome.pid, minutes: 30, reason: 'spam' }) });
+  assert.equal(r.status, 200);
+  await assert.rejects(fay.rpc('dm.send', { to: gus.welcome.pid, text: 'hi' }), { code: 'MUTED' }, 'chat-log mute also blocks DMs');
+  const acc = await adminHttp(gw1, `meta/account?id=${fay.welcome.pid}`);
+  assert.ok(acc.body.account.mutedUntil > Date.now() + 29 * 60000);
+  // Lifting it in the world-side list lifts the account mute too.
+  const sid = (await r.json()).id;
+  await until(async () => (await adminHttp(gw1, 'state')).body.sanctions?.some((x) => x.id === sid));
+  await sleep(200); // gateways receive the sanction list
+  assert.equal((await adminHttp(gw1, 'lift', { id: sid })).status, 200);
+  assert.ok(await until(async () => (await adminHttp(gw1, `meta/account?id=${fay.welcome.pid}`)).body.account.mutedUntil < Date.now()), 'account mute lifted');
+  await fay.rpc('dm.send', { to: gus.welcome.pid, text: 'thanks' });
+  fay.close();
+  gus.close();
+});
+
+test('GUESTS_CAN_CHAT=false: guests are told to log in, accounts chat normally', async () => {
+  const gw3 = await startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, maxPerIp: 100, metaUrls, guestsCanChat: false });
+  await sleep(300);
+  const guest = client(gw3);
+  await guest.ready();
+  guest.ws.send(JSON.stringify({ t: 'chat', text: 'hello' }));
+  assert.ok(await until(() => guest.notices.some((n) => n.includes('登录后才能聊天'))));
+  guest.close();
+  gw3.close();
+});
+
+test('meta replica failure: calls fail over, presence recovers when it returns', async () => {
+  const hal = await account(gw1, 'hal');
+  const ivy = await account(gw2, 'ivy');
+  await hal.rpc('friends.request', { name: 'ivy' });
+  await ivy.rpc('friends.request', { name: 'hal' });
+  // Kill the replica that is home to hal.
+  const h = hal.welcome.pid % 2;
+  await metas[h].close();
+  await sleep(300);
+  const w = await hal.rpc('wallet.get');
+  assert.equal(typeof w.balance, 'number', 'another replica serves the call');
+  await ivy.rpc('dm.send', { to: hal.welcome.pid, text: 'stored while home is down' });
+  // Bring it back on the same port.
+  metas[h] = await startMeta({ id: h, urls: metaUrls, port: base + 10 + h, secret, store, quiet: true });
+  assert.ok(
+    await until(async () => (await ivy.rpc('friends.list')).find((f) => f.name === 'hal')?.online === true, 8000),
+    'gateways re-announce hal after the replica restarts',
+  );
+  const unread = await hal.rpc('dm.unread');
+  assert.ok(unread.some((u) => u.name === 'ivy'), 'message sent during the outage is waiting');
+  await ivy.rpc('dm.send', { to: hal.welcome.pid, text: 'live again' });
+  assert.ok(await until(() => hal.events.some((e) => e.type === 'dm' && e.msg.text === 'live again')), 'live delivery resumes');
+  hal.close();
+  ivy.close();
 });

@@ -108,8 +108,9 @@ async function refreshMeta() {
     $('e-minted').textContent = eco.minted;
     $('e-sunk').textContent = eco.sunk;
     $('e-items').textContent = `${eco.items} / ${eco.openListings}`;
-    $('e-check').textContent = eco.balanceSum === 0 ? '账目守恒检查：通过（所有余额之和 = 0）' : `⚠ 账目不平：${eco.balanceSum}`;
-    $('e-check').className = eco.balanceSum === 0 ? 'muted' : 'err';
+    const replicas = eco.replicas ? ` · 账号服务 ${eco.replicasUp}/${eco.replicas} 个副本在线 · ${eco.accountsOnline} 个账号在线` : '';
+    $('e-check').textContent = (eco.balanceSum === 0 ? '账目守恒检查：通过（所有余额之和 = 0）' : `⚠ 账目不平：${eco.balanceSum}`) + replicas;
+    $('e-check').className = eco.balanceSum === 0 && eco.replicasUp === eco.replicas ? 'muted' : 'err';
   } catch (err) {
     $('status').textContent = `账号服务错误：${err.message}`;
   }

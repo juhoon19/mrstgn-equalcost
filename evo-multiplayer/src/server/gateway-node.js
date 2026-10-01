@@ -231,7 +231,9 @@ export async function startGateway(opts = {}) {
     return crypto.createHmac('sha256', tokenSecret).update('ip:' + ip).digest('base64url').slice(0, 16);
   }
   const live = (until) => !until || until > Date.now();
+  let sanctionList = [];
   function applySanctions(list) {
+    sanctionList = list || [];
     bannedPids.clear();
     bannedIps.clear();
     mutedPids.clear();
@@ -385,7 +387,11 @@ export async function startGateway(opts = {}) {
     throw new MetaError('SPAWN_FAILED', '物品已消耗但放回世界失败，已记录，请联系管理员');
   }
 
+  const AUTH_ENTRY = new Set(['auth.register', 'auth.login', 'auth.recover']);
   const registrations = new Map(); // ip -> [t]
+  // GUESTS_CAN_CHAT=false: only logged-in players may talk (with accounts on,
+  // a banned account can otherwise come back as a guest and keep chatting).
+  const guestsCanChat = String(opts.guestsCanChat ?? cfg.get('guests-can-chat', 'GUESTS_CAN_CHAT', 'true')) !== 'false';
   const registerPerHour = Number(opts.registerPerHour ?? cfg.get('register-per-hour', 'REGISTER_PER_IP_HOUR', 5));
   function rpcReply(c, id, body) {
     send(c, JSON.stringify({ t: 'rpcr', id, ...body }));
@@ -397,6 +403,7 @@ export async function startGateway(opts = {}) {
     if (c.rpcTokens <= 0) return rpcReply(c, id, { ok: false, code: 'RATE', msg: '操作太频繁' });
     c.rpcTokens--;
     try {
+      if (!meta.enabled) throw new MetaError('NO_META', '这个服务器没有启用账号系统');
       let r;
       if (m === 'item.capture') r = await capture(c, a);
       else if (m === 'item.release') r = await release(c, a);
@@ -413,6 +420,13 @@ export async function startGateway(opts = {}) {
         }
         const args = m === 'auth.logout' ? { token: c.session } : a;
         r = await meta.call(m, args, { acct: c.acct, ip: c.ip, ua: c.ua, key: String(a.name ?? '').toLowerCase() });
+        // A guest who registers or logs in keeps the lineage they grew as a
+        // guest: every shard re-owns it to the account (the guest id is
+        // proven by the signed token this connection presented).
+        if (AUTH_ENTRY.has(m) && !c.acct && c.pid >= GUEST_PID_MIN && r && r.account && r.account.id) {
+          const text = JSON.stringify({ t: 'adopt', from: c.pid, to: r.account.id });
+          for (const l of shardLinks) l.send(text);
+        }
       }
       rpcReply(c, id, { ok: true, r: r ?? null });
     } catch (err) {
@@ -547,7 +561,26 @@ export async function startGateway(opts = {}) {
       if (ROLE_RANK[who.role] < ROLE_RANK[ADMIN_POST[op]]) return json(403, { error: '权限不足' });
       const args = await readBody(req);
       if (!args) return json(400, { error: 'bad JSON' });
+      // Lifting a world-side sanction on an account lifts the account's too.
+      const lifted = op === 'lift' ? sanctionList.find((x) => x.id === Number(args.id)) : null;
       const r = await adminRequest(op, args);
+      if (r.ok && meta.enabled && lifted && lifted.pid > 0 && lifted.pid < GUEST_PID_MIN) {
+        const body = lifted.kind === 'mute' ? { id: lifted.pid, muteMinutes: 0 } : { id: lifted.pid, banMinutes: 0 };
+        meta.call('admin.sanction', { ...body, reason: 'lifted' }, ctx).catch((err) => log('account lift failed', err.message));
+      }
+      // Mute/ban from the chat log or player list target a world id; when
+      // that id is an account, sanction the account too, so it holds for
+      // private messages and survives new sessions.
+      const pid = Number(args.pid);
+      if (r.ok && meta.enabled && (op === 'mute' || op === 'ban') && pid > 0 && pid < GUEST_PID_MIN) {
+        const minutes = Number(args.minutes) > 0 ? Number(args.minutes) : 100 * 365 * 24 * 60; // 0 = permanent
+        const body = op === 'mute' ? { id: pid, muteMinutes: minutes } : { id: pid, banMinutes: minutes };
+        try {
+          await meta.call('admin.sanction', { ...body, reason: String(args.reason ?? '') }, ctx);
+        } catch (err) {
+          log('account sanction failed', err.message);
+        }
+      }
       // Every staff action lands in the audit log (who, what, to whom).
       if (r.ok && meta.enabled) meta.call('admin.note', { action: op, target: args.pid ?? args.chunk ?? '', detail: args }, ctx).catch(() => {});
       return json(r.ok ? 200 : 400, r.ok ? r.result : { error: r.error });
@@ -811,6 +844,10 @@ export async function startGateway(opts = {}) {
       c.lastChat = now;
       const raw = cleanText(msg.text, 200);
       if (!raw) return;
+      if (!c.acct && !guestsCanChat && meta.enabled) {
+        send(c, JSON.stringify({ t: 'notice', text: '登录后才能聊天（右侧 👤）。' }));
+        return;
+      }
       if ((mutedPids.has(c.pid) && live(mutedPids.get(c.pid))) || c.mutedUntil > now || (guestMuted.get(c.pid) || 0) > now) {
         send(c, JSON.stringify({ t: 'notice', text: '你已被禁言，消息未发送。' }));
         return;
