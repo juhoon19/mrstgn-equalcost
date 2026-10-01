@@ -102,7 +102,7 @@ docs/           架构、协议、接入指南、部署、参考、压测
 ## 常用命令
 
 ```bash
-npm test                                             # 44 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁、跨区切换、账号/交易/社交
+npm test                                             # 49 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁、跨区切换、账号/交易/社交
 TEST_DATABASE_URL=postgres://… node --test --test-concurrency=1 test/economy.test.js test/meta.test.js   # 在 PostgreSQL 上再跑一遍（会清空该库）
 node bench/headless.js --shards 4 --world 16x16      # 不开网络，看生态/性能
 node bench/bots.js --url ws://localhost:8080/ws --n 500 --duration 60   # 压测

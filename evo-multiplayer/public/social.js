@@ -206,7 +206,7 @@ export function initSocial(api) {
     const name = el('input', { placeholder: '用户名（2–20 个字）', autocomplete: 'username', maxLength: 20, value: api.store.get('name', '') });
     const pw = el('input', { type: 'password', placeholder: '密码（至少 8 位）', autocomplete: 'current-password' });
     const totp = el('input', { placeholder: '两步验证码（如已开启）', inputMode: 'numeric', maxLength: 6, class: 'hidden' });
-    const msg = el('p', { class: 'muted' }, '登录后可以收集生物、交易、加好友和私信。游客的谱系会保留在这个浏览器里。');
+    const msg = el('p', { class: 'muted' }, '登录后可以收集生物、交易、加好友和私信。你作为游客培育的后代会自动并入账号。');
     const login = act(async () => {
       try {
         const r = await rpc('auth.login', { name: name.value.trim(), password: pw.value, totp: totp.value.trim() || undefined });
