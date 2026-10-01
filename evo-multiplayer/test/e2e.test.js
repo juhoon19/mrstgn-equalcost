@@ -40,7 +40,7 @@ after(() => {
 
 function client(hello = {}) {
   const ws = new WebSocket(`ws://127.0.0.1:${gateway.port}/ws`);
-  const c = { ws, welcome: null, world: null, events: [], closed: false };
+  const c = { ws, welcome: null, world: null, events: [], closed: false, lastFrame: 0 };
   ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'tester', ...hello })));
   ws.on('close', () => (c.closed = true));
   ws.on('error', () => {});
@@ -53,6 +53,7 @@ function client(hello = {}) {
       }
       return;
     }
+    c.lastFrame = Date.now();
     unpackBatch(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), (u8) => {
       if (u8[0] === S_CHUNK) c.world.applyChunk(u8, performance.now());
       else if (u8[0] === S_EVENTS) c.events.push(decodeEvents(u8, c.welcome.world, c.welcome.posQuant));
@@ -70,6 +71,17 @@ async function until(fn, ms = 5000) {
   return false;
 }
 
+// After pausing the shards: wait until no frame has arrived for a while (a
+// fixed delay is not enough on a loaded machine).
+async function drained(clients, quietMs = 300, maxMs = 5000) {
+  const t0 = Date.now();
+  await sleep(quietMs);
+  while (Date.now() - t0 < maxMs) {
+    if (clients.every((c) => Date.now() - c.lastFrame >= quietMs)) return;
+    await sleep(25);
+  }
+}
+
 // loEvery is 1 here so the low-rate tier also ends exactly on the paused
 // tick; its separate stream state, flags and gateway keys are still exercised.
 test('client replicas (both quality tiers) match the authoritative state exactly', async () => {
@@ -81,24 +93,30 @@ test('client replicas (both quality tiers) match the authoritative state exactly
   lo.ws.send(encodeView(0, 0, W, W, TIER_LO));
   await sleep(3000); // let entities move, migrate across the shard seam, be born and die
   for (const s of shards) s.pause();
-  await sleep(400); // drain in-flight frames
-  const truth = new Map();
-  for (const s of shards) for (const ch of s.region.chunks.values()) for (const e of ch.entities) truth.set(e.id, e);
-  assert.ok(truth.size > 100);
-  for (const c of [hi, lo]) {
-    assert.equal(c.world.entities.size, truth.size, 'entity count differs');
-    for (const [id, e] of truth) {
-      const got = c.world.entities.get(id);
-      assert.ok(got, `client is missing entity ${id}`);
-      assert.ok(Math.abs(got.x - e.x) <= 0.5 / POS_QUANT + 1e-6, `x of ${id}: ${got.x} vs ${e.x}`);
-      assert.ok(Math.abs(got.y - e.y) <= 0.5 / POS_QUANT + 1e-6, `y of ${id}: ${got.y} vs ${e.y}`);
-      assert.equal(got.kind, e.kind);
+  // Always resume and disconnect, so one failure can't cascade into the
+  // following tests (paused world, per-IP connection cap used up).
+  try {
+    await drained([hi, lo]);
+    const truth = new Map();
+    for (const s of shards) for (const ch of s.region.chunks.values()) for (const e of ch.entities) truth.set(e.id, e);
+    assert.ok(truth.size > 100);
+    for (const c of [hi, lo]) {
+      assert.equal(c.world.entities.size, truth.size, 'entity count differs');
+      for (const [id, e] of truth) {
+        const got = c.world.entities.get(id);
+        assert.ok(got, `client is missing entity ${id}`);
+        assert.ok(Math.abs(got.x - e.x) <= 0.5 / POS_QUANT + 1e-6, `x of ${id}: ${got.x} vs ${e.x}`);
+        assert.ok(Math.abs(got.y - e.y) <= 0.5 / POS_QUANT + 1e-6, `y of ${id}: ${got.y} vs ${e.y}`);
+        assert.equal(got.kind, e.kind);
+      }
+      assert.equal(c.world.stats.unknownIds, 0);
     }
-    assert.equal(c.world.stats.unknownIds, 0);
-    c.ws.close();
+    assert.ok(lo.world.interval > hi.world.interval, 'low tier frames are flagged');
+  } finally {
+    for (const s of shards) s.resume();
+    hi.ws.close();
+    lo.ws.close();
   }
-  assert.ok(lo.world.interval > hi.world.interval, 'low tier frames are flagged');
-  for (const s of shards) s.resume();
 });
 
 test('chunks handed between live shards: clients stay exact and every map agrees', async () => {
@@ -135,29 +153,32 @@ test('chunks handed between live shards: clients stay exact and every map agrees
   }
   await sleep(1500); // new owners' keyframes reach the client
   for (const s of shards) s.pause();
-  await sleep(400);
-  // Every chunk lives on exactly one shard, and every map says so.
-  const version = topo.version;
-  for (let id = 0; id < topo.chunkCount; id++) {
-    const holders = shards.filter((s) => s.region.chunks.has(id)).map((s) => s.region.shardId);
-    assert.equal(holders.length, 1, `chunk ${id} held by [${holders}]`);
-    for (const s of shards) assert.equal(s.region.topo.ownerOf(id), holders[0], `shard ${s.region.shardId} map, chunk ${id}`);
-    assert.equal(gateway.topo.ownerOf(id), holders[0], `gateway map, chunk ${id}`);
+  try {
+    await drained([c]);
+    // Every chunk lives on exactly one shard, and every map says so.
+    const version = topo.version;
+    for (let id = 0; id < topo.chunkCount; id++) {
+      const holders = shards.filter((s) => s.region.chunks.has(id)).map((s) => s.region.shardId);
+      assert.equal(holders.length, 1, `chunk ${id} held by [${holders}]`);
+      for (const s of shards) assert.equal(s.region.topo.ownerOf(id), holders[0], `shard ${s.region.shardId} map, chunk ${id}`);
+      assert.equal(gateway.topo.ownerOf(id), holders[0], `gateway map, chunk ${id}`);
+    }
+    for (const s of shards) assert.equal(s.region.topo.version, version);
+    assert.equal(coord.coordinator.moves >= 8, true);
+    // And the client still sees exactly the authoritative world.
+    const truth = new Map();
+    for (const s of shards) for (const ch of s.region.chunks.values()) for (const e of ch.entities) truth.set(e.id, e);
+    assert.equal(c.world.entities.size, truth.size, 'entity count differs after handoffs');
+    for (const [id, e] of truth) {
+      const got = c.world.entities.get(id);
+      assert.ok(got, `client is missing entity ${id}`);
+      assert.ok(Math.abs(got.x - e.x) <= 0.5 / POS_QUANT + 1e-6);
+      assert.ok(Math.abs(got.y - e.y) <= 0.5 / POS_QUANT + 1e-6);
+    }
+  } finally {
+    for (const s of shards) s.resume();
+    c.ws.close();
   }
-  for (const s of shards) assert.equal(s.region.topo.version, version);
-  assert.equal(coord.coordinator.moves >= 8, true);
-  // And the client still sees exactly the authoritative world.
-  const truth = new Map();
-  for (const s of shards) for (const ch of s.region.chunks.values()) for (const e of ch.entities) truth.set(e.id, e);
-  assert.equal(c.world.entities.size, truth.size, 'entity count differs after handoffs');
-  for (const [id, e] of truth) {
-    const got = c.world.entities.get(id);
-    assert.ok(got, `client is missing entity ${id}`);
-    assert.ok(Math.abs(got.x - e.x) <= 0.5 / POS_QUANT + 1e-6);
-    assert.ok(Math.abs(got.y - e.y) <= 0.5 / POS_QUANT + 1e-6);
-  }
-  for (const s of shards) s.resume();
-  c.ws.close();
 });
 
 test('seeding creates organisms owned by the player; others see the effect and cursor', async () => {
