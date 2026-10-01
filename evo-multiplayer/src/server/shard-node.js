@@ -35,6 +35,10 @@ export async function startShard(opts = {}) {
   const fieldEvery = Number(opts.fieldEvery ?? cfg.get('field-every', 'FIELD_EVERY', 20));
   const fieldNetRes = Number(opts.fieldNetRes ?? cfg.get('field-net-res', 'FIELD_NET_RES', 8));
   const summaryEvery = Number(opts.summaryEvery ?? cfg.get('summary-every', 'SUMMARY_EVERY', 20));
+  const actionsPerChunkTick = Number(opts.actionsPerChunkTick ?? cfg.get('actions-per-chunk-tick', 'ACTIONS_PER_CHUNK_TICK', 20));
+  const chatLogPerSec = Number(opts.chatLogPerSec ?? cfg.get('chat-log-per-sec', 'CHAT_LOG_PER_SEC', 100));
+  let droppedActions = 0;
+  let chatLogBudget = chatLogPerSec;
   const quiet = opts.quiet ?? cfg.get('quiet', 'QUIET', '') === 'true';
   const log = (...a) => {
     if (!quiet) console.log(`[shard ${shardId}]`, ...a);
@@ -217,6 +221,7 @@ export async function startShard(opts = {}) {
         chunk.events.push({ kind: EV_CHAT, pid: msg.pid, x: msg.x, y: msg.y, text: String(msg.text).slice(0, 200) });
         // Every chat line also goes to the moderation log on shard 0.
         const entry = { t: 'chatlog', pid: msg.pid, text: String(msg.text).slice(0, 200), x: msg.x, y: msg.y, shard: shardId };
+        if (chatLogBudget-- <= 0) break; // log is a sample under floods; chat itself was delivered
         if (control) control.noteChat(entry);
         else {
           const l = peerLinks.get(0);
@@ -226,6 +231,9 @@ export async function startShard(opts = {}) {
       }
       case 'admin':
         handleAdmin(ws, msg);
+        break;
+      case 'mapreq':
+        if (coordinator && coordinator.ready) ws.send(JSON.stringify(coordinator.mapMessage()));
         break;
       case 'online':
         onlineByGateway.set(msg.gw, { n: msg.n, t: Date.now() });
@@ -242,6 +250,18 @@ export async function startShard(opts = {}) {
       for (let i = 0; i < n; i++) {
         const a = { pid: r.varint(), type: r.u8(), x: r.f32(), y: r.f32(), dx: r.f32(), dy: r.f32() };
         if (!region.ownsPoint(a.x, a.y)) continue;
+        // Crowd cap: however many players stand on one chunk, it absorbs at
+        // most ACTIONS_PER_CHUNK_TICK tool uses per tick (the rest are
+        // dropped; per-player cooldowns already applied at the gateway).
+        const target = region.chunks.get(topo.chunkAt(a.x, a.y));
+        if (target.actionTick !== region.tick) {
+          target.actionTick = region.tick;
+          target.actionCount = 0;
+        }
+        if (++target.actionCount > actionsPerChunkTick) {
+          droppedActions++;
+          continue;
+        }
         const player = region.players.get(a.pid);
         if (game.onAction(region, a, player)) {
           const chunk = region.chunks.get(topo.chunkAt(a.x, a.y));
@@ -385,6 +405,21 @@ export async function startShard(opts = {}) {
     region.recomputeBorders();
   }
 
+  function applyMapDelta(msg) {
+    if (!booted || msg.version <= topo.version) return;
+    if (msg.prev !== topo.version) {
+      // Missed an update: ask for the whole map.
+      if (shardId === 0) applyMap(coordinator.mapMessage());
+      else peerLinks.get(0)?.send(JSON.stringify({ t: 'mapreq', shard: shardId }));
+      return;
+    }
+    const owners = Array.from(topo.owner);
+    for (const [id, to] of msg.set) owners[id] = to;
+    for (const id of region.chunks.keys()) owners[id] = shardId; // never orphan a held chunk
+    topo.setOwners(owners, msg.version);
+    region.recomputeBorders();
+  }
+
   // Hand chunk `id` (and everything in it) to shard `to`.
   function giveChunk(id, to) {
     const ok = region.chunks.has(id) && region.chunks.size > 1 && to !== shardId;
@@ -431,6 +466,7 @@ export async function startShard(opts = {}) {
   // Messages from the coordinator (shard 0) to this shard.
   function onCoordinatorMessage(msg) {
     if (msg.t === 'map') applyMap(msg);
+    else if (msg.t === 'mapd') applyMapDelta(msg);
     else if (msg.t === 'move') giveChunk(msg.chunk, msg.to);
   }
 
@@ -470,6 +506,8 @@ export async function startShard(opts = {}) {
     } else if (msg.t === 'claim') {
       shardSockets.set(msg.shard, ws);
       coordinator.addClaim(msg);
+    } else if (msg.t === 'mapreq') {
+      if (coordinator.ready && ws.readyState === 1) ws.send(JSON.stringify(coordinator.mapMessage()));
     } else if (msg.t === 'load') coordinator.onLoad(msg);
     else if (msg.t === 'moved') coordinator.onMoved(msg);
   }
@@ -600,6 +638,7 @@ export async function startShard(opts = {}) {
           migratedOut,
           chunksIn,
           chunksOut,
+          droppedActions,
           mapVersion: topo.version,
           coordinator: coordinator ? { moves: coordinator.moves, pending: coordinator.pending } : undefined,
           ...stats,
@@ -821,6 +860,7 @@ export async function startShard(opts = {}) {
         const l = peerLinks.get(0);
         if (l && l.open) l.send(JSON.stringify(loadReport()));
       }
+      chatLogBudget = chatLogPerSec;
       // Forget cursor locations whose cursor already expired or was cleared.
       for (const [pid, id] of cursorChunk) {
         const c = region.chunks.get(id);

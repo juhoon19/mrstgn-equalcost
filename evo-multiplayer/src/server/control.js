@@ -119,6 +119,7 @@ export class Control {
         // IP bans are opt-in (withIp): behind carrier-grade NAT, a school or
         // a proxy, one address can be many innocent players.
         const ipHash = args.ipHash || (op === 'ban' && args.withIp === true ? p?.ipHash : '');
+        if (args.withIp === true && !ipHash) throw new Error('this player\'s address is not known (yet); try again');
         if (ipHash) s.ipHash = ipHash;
         this.sanctions.push(s);
         this.save();

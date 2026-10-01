@@ -46,6 +46,17 @@ export class Coordinator {
     this.movedAt = new Map(); // chunk -> time of last move
   }
 
+  // Ownership changes are broadcast as deltas (a full map is ~3 bytes per
+  // chunk: 50 KB for a 128x128 world, times every shard and gateway, per
+  // move). A receiver whose version is not `prev` asks for the full map.
+  changeOwners(changes) {
+    const owner = Array.from(this.topo.owner);
+    for (const [id, to] of changes) owner[id] = to;
+    const prev = this.topo.version;
+    this.topo.setOwners(owner, prev + 1);
+    this.broadcast({ t: 'mapd', prev, version: this.topo.version, set: changes });
+  }
+
   mapMessage() {
     return { t: 'map', version: this.topo.version, owner: Array.from(this.topo.owner) };
   }
@@ -107,18 +118,16 @@ export class Coordinator {
     // Self-healing: a shard's report of which chunks it actually holds is
     // the truth. If the map disagrees (e.g. a "moved" confirmation got lost),
     // fix the map - except for the chunk currently being handed over.
-    let owner = null;
+    const fixes = [];
     for (const id of chunks.keys()) {
       if (id < 0 || id >= this.topo.owner.length) continue;
       if (this.topo.owner[id] === load.shard) continue;
       if (this.pending && this.pending.chunk === id) continue;
-      if (!owner) owner = Array.from(this.topo.owner);
-      owner[id] = load.shard;
+      fixes.push([id, load.shard]);
     }
-    if (owner) {
-      this.topo.setOwners(owner, this.topo.version + 1);
+    if (fixes.length) {
+      this.changeOwners(fixes);
       this.log(`map corrected from shard ${load.shard}'s report (v${this.topo.version})`);
-      this.broadcast(this.mapMessage());
     }
   }
 
@@ -128,13 +137,10 @@ export class Coordinator {
     this.pending = null;
     this.cooldownUntil = Date.now() + this.cooldownMs;
     if (ok === false) return;
-    const owner = Array.from(this.topo.owner);
-    owner[chunk] = to;
-    this.topo.setOwners(owner, this.topo.version + 1);
+    this.changeOwners([[chunk, to]]);
     this.moves++;
     this.movedAt.set(chunk, Date.now());
     this.log(`moved chunk ${chunk}: shard ${from} -> ${to} (map v${this.topo.version})`);
-    this.broadcast(this.mapMessage());
   }
 
   // Ask the owner of `chunk` to hand it to `to`. Returns false if busy.

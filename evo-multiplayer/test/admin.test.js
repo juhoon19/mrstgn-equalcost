@@ -145,7 +145,10 @@ test('identity ban: kicked everywhere, token refused, same IP may still play; IP
   assert.ok(await until(() => fresh.welcome), 'innocent player on the same IP refused');
 
   // Now an IP ban (everything here is 127.0.0.1).
-  const ipBan = await admin(gw1, 'ban', { pid: fresh.welcome.pid, minutes: 60, withIp: true });
+  // Registrations reach the control shard in batches; until then an IP ban
+  // is refused with an error rather than silently degraded.
+  let ipBan;
+  assert.ok(await until(async () => (ipBan = await admin(gw1, 'ban', { pid: fresh.welcome.pid, minutes: 60, withIp: true })).status === 200));
   assert.ok(ipBan.body.ipHash);
   assert.ok(await until(() => fresh.closeCode === 4003));
   const blocked = client(gw2);

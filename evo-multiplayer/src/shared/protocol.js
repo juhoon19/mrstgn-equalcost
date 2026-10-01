@@ -444,19 +444,24 @@ export function decodeEvents(bytes, world, posQuant) {
   return { chunkId, cursors, events };
 }
 
+// World overview: cols x rows cells, each covering bw x bh chunks.
+// Per cell: u8 population (log: pop = 2^(q/20) - 1), u24 dominant colour,
+// u8 mean nutrient.
 export function decodeSummary(bytes) {
   const r = new Reader(bytes);
   r.u8();
-  const chunksX = r.varint();
-  const chunksY = r.varint();
-  const n = chunksX * chunksY;
-  const pop = new Uint16Array(n);
+  const cols = r.varint();
+  const rows = r.varint();
+  const bw = r.varint();
+  const bh = r.varint();
+  const n = cols * rows;
+  const pop = new Float32Array(n);
   const rgb = new Uint32Array(n);
   const nutrient = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
-    pop[i] = r.u16();
+    pop[i] = Math.pow(2, r.u8() / 20) - 1;
     rgb[i] = r.u24();
     nutrient[i] = r.u8();
   }
-  return { chunksX, chunksY, pop, rgb, nutrient };
+  return { cols, rows, bw, bh, pop, rgb, nutrient };
 }

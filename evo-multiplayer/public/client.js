@@ -559,19 +559,21 @@ function fieldImage(chunkId, f) {
 function drawSummary() {
   if (!summary) return;
   const S = welcome.world.chunkSize;
-  for (let cy = 0; cy < summary.chunksY; cy++) {
-    for (let cx = 0; cx < summary.chunksX; cx++) {
-      const i = cy * summary.chunksX + cx;
+  const cwW = S * summary.bw; // world size of one summary cell
+  const chW = S * summary.bh;
+  const per = summary.bw * summary.bh; // chunks per cell
+  for (let r = 0; r < summary.rows; r++) {
+    for (let q = 0; q < summary.cols; q++) {
+      const i = r * summary.cols + q;
       const n = summary.nutrient[i] / 255;
       ctx.fillStyle = `rgb(${20 + n * 20},${26 + n * 90},${36 + n * 40})`;
-      ctx.fillRect(cx * S, cy * S, S + 0.5, S + 0.5);
-      const pop = summary.pop[i];
-      if (pop > 0) {
+      ctx.fillRect(q * cwW, r * chW, cwW + 0.5, chW + 0.5);
+      const pop = summary.pop[i] / per;
+      if (pop > 0.5) {
         const a = Math.min(0.85, 0.15 + pop / 120);
         const rgb = summary.rgb[i];
         ctx.fillStyle = `rgba(${rgb >> 16},${(rgb >> 8) & 255},${rgb & 255},${a})`;
-        const pad = S * 0.18;
-        ctx.fillRect(cx * S + pad, cy * S + pad, S - 2 * pad, S - 2 * pad);
+        ctx.fillRect(q * cwW + cwW * 0.18, r * chW + chW * 0.18, cwW * 0.64, chW * 0.64);
       }
     }
   }
@@ -754,17 +756,20 @@ function drawMinimap() {
   const sx = w / topo.width;
   const sy = h / topo.height;
   if (summary) {
-    const cw = w / summary.chunksX;
-    const ch = h / summary.chunksY;
+    // Cells may overhang the world edge when the grid does not divide evenly.
+    const cw = (w * summary.bw * welcome.world.chunkSize) / topo.width;
+    const ch = (h * summary.bh * welcome.world.chunkSize) / topo.height;
+    const per = summary.bw * summary.bh;
     for (let i = 0; i < summary.pop.length; i++) {
-      const cx = i % summary.chunksX;
-      const cy = (i - cx) / summary.chunksX;
+      const cx = i % summary.cols;
+      const cy = (i - cx) / summary.cols;
       const n = summary.nutrient[i] / 255;
       mctx.fillStyle = `rgb(${14 + n * 20},${20 + n * 80},${28 + n * 30})`;
       mctx.fillRect(cx * cw, cy * ch, cw + 0.5, ch + 0.5);
-      if (summary.pop[i] > 0) {
+      const pop = summary.pop[i] / per;
+      if (pop > 0.5) {
         const rgb = summary.rgb[i];
-        mctx.fillStyle = `rgba(${rgb >> 16},${(rgb >> 8) & 255},${rgb & 255},${Math.min(0.9, 0.2 + summary.pop[i] / 100)})`;
+        mctx.fillStyle = `rgba(${rgb >> 16},${(rgb >> 8) & 255},${rgb & 255},${Math.min(0.9, 0.2 + pop / 100)})`;
         mctx.fillRect(cx * cw + cw * 0.2, cy * ch + ch * 0.2, cw * 0.6, ch * 0.6);
       }
     }

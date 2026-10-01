@@ -79,6 +79,7 @@ export async function startGateway(opts = {}) {
   const secret = opts.secret ?? cfg.secret;
   const tokenSecret = opts.tokenSecret ?? cfg.get('token-secret', 'TOKEN_SECRET', secret + ':tokens');
   const maxChunks = Number(opts.maxChunks ?? cfg.get('max-chunks', 'MAX_CHUNKS', 30));
+  const summaryMax = Number(opts.summaryMax ?? cfg.get('summary-max', 'SUMMARY_MAX', 48));
   const maxChunksLo = Number(opts.maxChunksLo ?? cfg.get('max-chunks-lo', 'MAX_CHUNKS_LO', 80));
   const viewMargin = Number(opts.viewMargin ?? cfg.get('view-margin', 'VIEW_MARGIN', 96));
   const maxPerIp = Number(opts.maxPerIp ?? cfg.get('max-per-ip', 'MAX_PER_IP', 16));
@@ -145,7 +146,7 @@ export async function startGateway(opts = {}) {
   const clients = new Set();
   const players = new Map(); // pid -> client (this gateway only)
   const perIp = new Map();
-  const counters = { bytesOut: 0, msgsOut: 0, framesIn: 0, resyncs: 0, dropped: 0, actions: 0 };
+  const counters = { bytesIn: 0, bytesOut: 0, msgsOut: 0, framesIn: 0, resyncs: 0, dropped: 0, actions: 0 };
 
   topoCfg.shards.forEach((url, i) => {
     const link = new Link(
@@ -255,6 +256,7 @@ export async function startGateway(opts = {}) {
   const filterChat = (text) => (blockRe ? text.replace(blockRe, (m) => '*'.repeat([...m].length)) : text);
 
   // Admin API: HTTP on the gateway, answered by shard 0 over the link.
+  let pendingPlayers = [];
   const adminPending = new Map();
   let adminSeq = 0;
   function adminRequest(op, args) {
@@ -320,10 +322,20 @@ export async function startGateway(opts = {}) {
   }
 
   function onShardMessage(shard, data, isBinary) {
+    counters.bytesIn += isBinary ? data.length : data.length;
     if (!isBinary) {
       const msg = JSON.parse(data.toString());
       if (msg.t === 'lb') lbByShard.set(shard, msg);
       else if (msg.t === 'map') applyMap(msg);
+      else if (msg.t === 'mapd') {
+        if (msg.version <= topo.version) return;
+        if (msg.prev !== topo.version) shardLinks[0].send(JSON.stringify({ t: 'mapreq' }));
+        else {
+          const owner = Array.from(topo.owner);
+          for (const [id, to] of msg.set) owner[id] = to;
+          applyMap({ version: msg.version, owner });
+        }
+      }
       else if (msg.t === 'sanctions') applySanctions(msg.list);
       else if (msg.t === 'kick') for (const pid of msg.pids || []) players.get(pid)?.ws.close(4001, 'kicked');
       else if (msg.t === 'adminr') {
@@ -586,8 +598,9 @@ export async function startGateway(opts = {}) {
     c.hue = Number.isFinite(hue) ? ((hue % 1) + 1) % 1 : (pid % 360) / 360;
     c.rgb = hueToRgb(c.hue);
     players.set(pid, c);
-    const rec = JSON.stringify({ t: 'player', p: [playerRecord(c)] });
-    for (const l of shardLinks) l.send(rec);
+    // Registrations are batched (flushTimer): at 100k players a join storm
+    // would otherwise be one message per join per shard.
+    pendingPlayers.push(playerRecord(c));
     send(
       c,
       JSON.stringify({
@@ -803,6 +816,11 @@ export async function startGateway(opts = {}) {
         c.cursorShard = shard;
       }
     }
+    if (pendingPlayers.length) {
+      const msg = JSON.stringify({ t: 'player', p: pendingPlayers });
+      pendingPlayers = [];
+      for (const l of shardLinks) l.send(msg); // closed links get everyone on reconnect
+    }
     for (let s = 0; s < shardLinks.length; s++) {
       const link = shardLinks[s];
       if (!link.open) {
@@ -870,10 +888,9 @@ export async function startGateway(opts = {}) {
     }
     if (shardLinks[0].open) shardLinks[0].send(JSON.stringify({ t: 'online', gw: gwId, n: players.size }));
 
-    // World summary (encoded once for everyone).
-    const w = new Writer(8 + topo.chunkCount * 6).u8(S_SUMMARY).varint(world.chunksX).varint(world.chunksY);
-    for (let i = 0; i < topo.chunkCount; i++) w.u16(summary.pop[i]).u24(summary.rgb[i]).u8(summary.nutrient[i]);
-    const sumBuf = w.finish();
+    // World summary (encoded once for everyone), downsampled to at most
+    // SUMMARY_MAX x SUMMARY_MAX cells so its size does not grow with the world.
+    const sumBuf = encodeSummary();
 
     // Leaderboard / global stats merged over shards.
     const totals = new Map();
@@ -897,11 +914,13 @@ export async function startGateway(opts = {}) {
       .slice(0, 15)
       .map(([pid, n]) => [pid, names.get(pid) ?? players.get(pid)?.name ?? '?', n]);
     const statsMsg = JSON.stringify({ t: 'stats', online: Math.max(online, players.size), cells, entities, tidi, top });
-    // The overview changes slowly: every 2 s is plenty (first second for new joiners).
-    const sendSummary = (secondsTicked++ & 1) === 0;
+    // Zoomed-out clients (watching no chunks) see the summary as the world:
+    // every 2 s. Everyone else only uses it for the minimap: every 6 s.
+    const tickNo = secondsTicked++;
     for (const c of clients) {
       if (!c.pid || backlog(c) > highWater) continue;
-      if (sendSummary || !c.gotSummary) {
+      const lod = c.view && c.chunks.size === 0;
+      if (!c.gotSummary || tickNo % (lod ? 2 : 6) === 0) {
         send(c, sumBuf);
         c.gotSummary = true;
       }
@@ -911,12 +930,49 @@ export async function startGateway(opts = {}) {
     const dtS = (now - lastCounters.at) / 1000;
     rates = {
       bytesOutPerSec: Math.round((counters.bytesOut - lastCounters.bytesOut) / dtS),
+      // Internal traffic from shards: grows with the area this gateway's
+      // players watch (zones keep it bounded, see docs/scale-100k.md).
+      bytesInPerSec: Math.round((counters.bytesIn - lastCounters.bytesIn) / dtS),
       msgsOutPerSec: Math.round((counters.msgsOut - lastCounters.msgsOut) / dtS),
       framesInPerSec: Math.round((counters.framesIn - lastCounters.framesIn) / dtS),
       actionsPerSec: Math.round((counters.actions - lastCounters.actions) / dtS),
     };
     lastCounters = { ...counters, at: now };
   }, 1000);
+
+  function encodeSummary() {
+    const { chunksX, chunksY } = world;
+    const bw = Math.ceil(chunksX / summaryMax);
+    const bh = Math.ceil(chunksY / summaryMax);
+    const cols = Math.ceil(chunksX / bw);
+    const rows = Math.ceil(chunksY / bh);
+    const w = new Writer(16 + cols * rows * 5).u8(S_SUMMARY).varint(cols).varint(rows).varint(bw).varint(bh);
+    for (let r = 0; r < rows; r++) {
+      for (let q = 0; q < cols; q++) {
+        let pop = 0;
+        let best = -1;
+        let rgb = 0;
+        let nut = 0;
+        let n = 0;
+        for (let y = r * bh; y < Math.min(chunksY, (r + 1) * bh); y++) {
+          for (let x = q * bw; x < Math.min(chunksX, (q + 1) * bw); x++) {
+            const i = y * chunksX + x;
+            pop += summary.pop[i];
+            nut += summary.nutrient[i];
+            n++;
+            if (summary.pop[i] > best) {
+              best = summary.pop[i];
+              rgb = summary.rgb[i];
+            }
+          }
+        }
+        w.u8(Math.min(255, Math.round(20 * Math.log2(1 + pop))))
+          .u24(rgb)
+          .u8(Math.round(nut / Math.max(1, n)));
+      }
+    }
+    return w.finish();
+  }
 
   function metrics() {
     return {

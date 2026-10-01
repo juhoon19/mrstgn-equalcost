@@ -66,7 +66,7 @@ test('balancing moves a populated border chunk from the hot shard to the cool ne
   assert.equal(c.tick(), null, 'no second move while one is pending');
   c.onMoved({ chunk: plan.chunk, from: 0, to: 1, ok: true });
   assert.equal(topo.ownerOf(plan.chunk), 1);
-  assert.equal(maps.at(-1).version, topo.version);
+  assert.deepEqual(maps.at(-1), { t: 'mapd', prev: topo.version - 1, version: topo.version, set: [[plan.chunk, 1]] });
 });
 
 test('no move that would just flip the imbalance, and never below one chunk', () => {
@@ -89,7 +89,7 @@ test('load reports correct a stale map (lost confirmation)', () => {
   c.onLoad({ shard: 1, tickMs: 1, entities: 1, chunks: [[1, 3], [2, 0]] });
   assert.equal(topo.ownerOf(1), 1);
   assert.equal(topo.version, v + 1);
-  assert.equal(maps.at(-1).owner[1], 1);
+  assert.deepEqual(maps.at(-1).set, [[1, 1]]);
 });
 
 test('hysteresis: a single hot second does not trigger a move; sustained heat does', () => {
