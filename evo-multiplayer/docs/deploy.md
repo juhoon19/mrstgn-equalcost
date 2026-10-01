@@ -59,7 +59,15 @@ fly deploy --config deploy/fly.toml
 
 单机里跑多个分片和网关进程（`SHARDS`、`GATEWAYS` 环境变量）。
 
-## D. 多台机器（上万人）
+## D. 多台机器（上万人；10 万人见 [scale-100k.md](scale-100k.md)）
+
+最省事的方式是用生成器产出整套 Compose/Swarm 文件：
+
+```bash
+node scripts/gen-cluster.mjs --shards 16 --zones 2x2 --gw-per-zone 2 --world 64x64 --out deploy/generated
+```
+
+也可以手动按下面的方式在每台机器上起进程：
 
 每个进程都读同一个 `TOPOLOGY`（JSON）：
 
@@ -108,6 +116,9 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `HOT_MS` / `BALANCE_RATIO` | 分片 tick 耗时超过多少毫秒算热 / 接收方须低于热分片的多少倍 | 30 / 0.7 |
 | `ADMIN_TOKEN` | 开启运维后台 `/admin` 和 `/admin/api/*`（不设则关闭）。用长随机串 | 空 |
 | `BLOCKLIST` | 聊天屏蔽词文件路径（每行一个，`#` 开头为注释，不区分大小写，替换为 `*`） | 空 |
+| `ZONES` / `ZONE` | 分区：`{"cols":4,"rows":4,"urls":["/z/0/ws",…]}`，每个网关用 `ZONE` 指明自己服务哪个区（-1 = 大厅）。用 `scripts/gen-cluster.mjs` 生成，见 scale-100k.md | 不分区 |
+| `ACTIONS_PER_CHUNK_TICK` / `CHAT_LOG_PER_SEC` | 每区块每 tick 最多处理多少次工具操作 / 每分片每秒最多抄送多少条聊天给后台 | 20 / 100 |
+| `SUMMARY_MAX` | 世界概览最多多少格（每边） | 48 |
 | `BOOT_WAIT` | 0 号分片冷启动时最多等其他分片报到多久（毫秒） | 6000 |
 | `SHARDS` / `GATEWAYS` / `WORLD` | `launch.js` 单机启动用 | 自动 / 自动 / 24x24 |
 

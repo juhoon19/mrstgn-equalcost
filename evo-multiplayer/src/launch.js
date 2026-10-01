@@ -107,7 +107,9 @@ if (zonesArg) {
   console.log(`[launch] zones ${cols}x${rows}: gateways on ports ${port + 1}..${port + cols * rows}`);
 }
 
-cluster.setupPrimary({ exec: path.join(HERE, 'server/gateway-node.js') });
+// Workers get their settings from env only; the launcher's own flags (e.g.
+// --zones 2x2) mean something else to a gateway.
+cluster.setupPrimary({ exec: path.join(HERE, 'server/gateway-node.js'), args: [] });
 const lobbyEnv = { ...env, ...zoneEnv, ZONE: '-1', PORT: String(port), HOST: arg('host', 'HOST', '0.0.0.0') };
 for (let i = 0; i < gateways; i++) cluster.fork(lobbyEnv);
 cluster.on('exit', (worker, code) => {
