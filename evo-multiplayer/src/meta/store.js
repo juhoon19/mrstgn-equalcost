@@ -60,7 +60,12 @@ async function openPg(url) {
     },
     close: () => pool.end(),
   };
-  await migrate(store);
+  try {
+    await migrate(store);
+  } catch (err) {
+    await pool.end().catch(() => {});
+    throw err;
+  }
   return store;
 }
 
@@ -296,10 +301,15 @@ CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires);
 CREATE INDEX IF NOT EXISTS messages_at ON messages(at);
 `,
     },
+    {
+      v: 3,
+      why: 'admin abuse signals scan recent ledger rows',
+      sql: `CREATE INDEX IF NOT EXISTS ledger_at ON ledger(at);`,
+    },
   ];
 }
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 async function migrate(store) {
   const base = schema(store.kind);

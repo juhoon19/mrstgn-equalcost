@@ -152,12 +152,36 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 
 API（都需要 `Authorization: Bearer <ADMIN_TOKEN>`）：`GET /admin/api/state`、`GET /admin/api/players?q=`，以及 `POST /admin/api/{mute,kick,ban,lift,move,balance}`，POST 的参数用 JSON 传，如 `{"pid":123,"minutes":60,"reason":"刷屏","withIp":false}`、`{"id":3}`、`{"chunk":40,"to":2}`、`{"on":false}`。同一 IP 一分钟内口令错 10 次会被暂时拒绝。
 
+## 备份与恢复
+
+`scripts/backup.sh` 把不能重新生成的东西打成一个压缩包：账号和财产（数据库）、世界（分片快照）、以及让它们能用的密钥。游戏运行时可以直接备份。
+
+```bash
+scripts/backup.sh local                 # npm start / launch.js：备份 data/（SQLite + 快照 + secrets.json）
+scripts/backup.sh compose deploy        # Docker Compose：pg_dump + 每个分片卷
+# 定时（每小时第 17 分钟），保留最近 48 份，并传到别的地方：
+17 * * * *  cd /srv/evo-multiplayer && KEEP=48 BACKUP_UPLOAD="rclone copy" scripts/backup.sh compose deploy remote:evo-backups >> backups/backup.log 2>&1
+```
+
+（`BACKUP_UPLOAD` 会以压缩包路径作为最后一个参数被调用；如果你的工具要求目标放在最后，就写一个小脚本包一层。）
+
+恢复：
+
+```bash
+scripts/restore.sh local   backups/evo-backup-XXXX.tar.gz            # 先停游戏
+scripts/restore.sh compose backups/evo-backup-XXXX.tar.gz deploy     # 用和原集群相同的环境变量（密钥、WORLD_ID）
+```
+
+**实测过的灾难演练**（Docker Compose：PostgreSQL + 2 个 meta + 4 个分片 + 网关 + Caddy）：备份 → `docker compose down -v` 删掉整个集群和所有数据卷 → 重新启动（此时旧的登录凭证无效、账号不存在）→ `restore.sh` → 用原来的会话 token 直接登录成功，余额还在，分片从备份的快照继续运行。
+
+Docker Compose 部署里，密钥（`CLUSTER_SECRET`、`TOKEN_SECRET`、`WORLD_ID`、`ADMIN_TOKEN`、`POSTGRES_PASSWORD`）在你的环境变量或 `.env` 里，不在数据卷中，请单独妥善保存。**`TOKEN_SECRET` 丢了，所有游客身份失效；`WORLD_ID` 改了，世界和物品的对应关系会断开。**
+
 ## 上线安全清单
 
 - [ ] 设置 `ADMIN_TOKEN`（长随机串），上线后第一时间确认 `/admin` 能用。
 - [ ] 设置随机的 `CLUSTER_SECRET`、`TOKEN_SECRET`，并固定 `TOKEN_SECRET`（`launch.js` 未指定时会自动生成并存在 `data/secrets.json`）。
 - [ ] 备份 `DATA_DIR`（Docker 里是每个分片的 `shardN_data` 卷）：那就是整个世界。
-- [ ] **备份 PostgreSQL**（`pg_dump` 定时任务或 WAL 归档，存到另一台机器 / 对象存储）：那是玩家的全部账号和财产。单机 SQLite 就备份 `data/meta.db`。
+- [ ] **定时运行 `scripts/backup.sh`，并把备份传到另一台机器 / 对象存储**；上线前做一次恢复演练（见上面“备份与恢复”）。
 - [ ] 第一个管理员账号设好后，所有管理人员开启两步验证。
 - [ ] 分片端口只在内网；防火墙只开 80/443。
 - [ ] 走 HTTPS/WSS（Caddy/Cloudflare 自动处理）。

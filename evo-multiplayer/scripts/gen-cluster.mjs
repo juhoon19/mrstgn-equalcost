@@ -73,13 +73,14 @@ if (metas > 0) {
   y.push('    restart: unless-stopped');
   y.push('    environment: { POSTGRES_USER: evo, POSTGRES_DB: evo, POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}" }');
   y.push("    volumes: ['pg_data:/var/lib/postgresql/data']");
+  y.push("    healthcheck: { test: ['CMD', 'pg_isready', '-U', 'evo'], interval: 3s, timeout: 3s, retries: 20 }");
   y.push('    networks: [internal]');
   for (let i = 0; i < metas; i++) {
     y.push(`  meta${i}:`);
     y.push('    <<: *common');
     y.push("    command: ['node', '--no-warnings', 'src/meta/meta-node.js']");
     y.push(`    environment: { <<: *env, META_ID: '${i}', HOST: '0.0.0.0', PORT: '9300', DATABASE_URL: 'postgres://evo:\${POSTGRES_PASSWORD}@postgres/evo' }`);
-    y.push('    depends_on: [postgres]');
+    y.push('    depends_on: { postgres: { condition: service_healthy } }');
   }
 }
 const gw = (name, zone, replicas) => {

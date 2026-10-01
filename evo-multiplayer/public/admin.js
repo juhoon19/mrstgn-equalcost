@@ -101,8 +101,9 @@ const fmt = (t) => new Date(t).toLocaleString();
 
 async function refreshMeta() {
   try {
-    const [reports, audit, eco] = await Promise.all([metaApi('reports'), metaApi('audit'), metaApi('economy')]);
+    const [reports, audit, eco, flows] = await Promise.all([metaApi('reports'), metaApi('audit'), metaApi('economy'), metaApi('flows')]);
     renderReports(reports);
+    renderFlows(flows);
     renderAudit(audit);
     $('e-circ').textContent = eco.circulating;
     $('e-minted').textContent = eco.minted;
@@ -173,6 +174,28 @@ function renderReports(list) {
     acts.append(button('结案', () => metaAct('closeReport', { id: r.id, note: prompt('处理说明') || '' })));
     tr.append(td(fmt(r.at)), td(r.reporterName), td(r.targetName), ev, acts);
     body.append(tr);
+  }
+}
+
+function renderFlows(f) {
+  const body = $('flows');
+  body.textContent = '';
+  for (const r of f.receivers) {
+    const tr = document.createElement('tr');
+    tr.append(td(r.suspicious ? '⚠' : '', r.suspicious ? 'err' : ''), td(`${r.name} (#${r.id})`), td(r.received), td(r.senders), td(r.fromYoung));
+    body.append(tr);
+  }
+  if (!f.receivers.length) {
+    const tr = document.createElement('tr');
+    tr.append(td('没有玩家间转账', 'muted'));
+    body.append(tr);
+  }
+  const cl = $('clusters');
+  cl.textContent = '';
+  for (const c of f.clusters) {
+    const tr = document.createElement('tr');
+    tr.append(td(c.names.join('、'), 'wrap'), td(c.accounts), td(c.movedInside, c.movedInside > 0 ? 'err' : ''));
+    cl.append(tr);
   }
 }
 

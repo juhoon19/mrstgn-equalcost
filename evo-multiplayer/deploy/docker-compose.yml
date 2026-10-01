@@ -61,17 +61,18 @@ services:
       POSTGRES_DB: evo
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes: ['pg_data:/var/lib/postgresql/data']
+    healthcheck: { test: ['CMD', 'pg_isready', '-U', 'evo'], interval: 3s, timeout: 3s, retries: 20 }
     networks: [internal]
   meta0:
     <<: *common
     command: ['node', '--no-warnings', 'src/meta/meta-node.js']
     environment: { <<: *env, META_ID: '0', HOST: '0.0.0.0', PORT: '9300', DATABASE_URL: 'postgres://evo:${POSTGRES_PASSWORD}@postgres/evo' }
-    depends_on: [postgres]
+    depends_on: { postgres: { condition: service_healthy } }
   meta1:
     <<: *common
     command: ['node', '--no-warnings', 'src/meta/meta-node.js']
     environment: { <<: *env, META_ID: '1', HOST: '0.0.0.0', PORT: '9300', DATABASE_URL: 'postgres://evo:${POSTGRES_PASSWORD}@postgres/evo' }
-    depends_on: [postgres]
+    depends_on: { postgres: { condition: service_healthy } }
 
   gateway:
     <<: *common

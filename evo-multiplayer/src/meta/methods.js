@@ -48,6 +48,7 @@ export const ADMIN_METHODS = {
   reports: { method: 'GET', role: 'mod' },
   audit: { method: 'GET', role: 'mod' },
   economy: { method: 'GET', role: 'mod' },
+  flows: { method: 'GET', role: 'mod' },
   account: { method: 'GET', role: 'mod' },
   closeReport: { method: 'POST', role: 'mod' },
   sanction: { method: 'POST', role: 'mod' },

@@ -112,6 +112,20 @@ for (const url of urls) {
     // IPs are stored only as keyed hashes.
     const raw = await store.query("SELECT reg_ip FROM accounts WHERE name_lc = 'shared'");
     assert.ok(raw.rows[0].reg_ip && !raw.rows[0].reg_ip.includes('10.0.0.1'));
+    // Abuse signals: three fresh alts on one IP funnel their coins to a main.
+    const eco = new Economy(store);
+    const main = (await r1.register({ name: 'mainacct', password: 'password123', ip: '10.9.9.9' })).account.id;
+    for (let i = 0; i < 3; i++) {
+      const alt = (await r2.register({ name: `alt${i}`, password: 'password123', ip: '10.0.0.7' })).account.id;
+      await store.tx((t) => move(t, { key: `funnel:${i}`, kind: 'trade', from: alt, to: main, amount: 90 }));
+    }
+    const f = await eco.flows({ hours: 1 });
+    const top = f.receivers[0];
+    assert.equal(top.id, main);
+    assert.equal(top.received, 270);
+    assert.equal(top.senders, 3);
+    assert.equal(top.suspicious, true);
+    assert.ok(f.clusters.some((c) => c.accounts >= 3 && c.names.includes('alt0')));
     const v = await store.query('SELECT max(v) AS v FROM schema_version');
     assert.equal(Number(v.rows[0].v), SCHEMA_VERSION);
     await store.close();

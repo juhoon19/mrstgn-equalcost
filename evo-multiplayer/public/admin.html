@@ -260,6 +260,20 @@
           <p id="e-check" class="muted"></p>
         </section>
         <section data-meta>
+          <h2>可疑资金流向（近 24 小时）</h2>
+          <p class="muted">只做提示，不会自动处罚：同一个路由器后面的一家人看起来也像“同 IP 多号”。⚠ = 至少 3 个转出方，且一半以上来自注册不满 7 天的账号（典型的“小号刷启动金再转给大号”）。</p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th></th><th>收款账号</th><th>收入</th><th>转出方</th><th>来自新号</th></tr></thead>
+              <tbody id="flows"></tbody>
+            </table>
+            <table style="margin-top: 8px">
+              <thead><tr><th>同一注册 IP 的账号</th><th>数量</th><th>组内互转</th></tr></thead>
+              <tbody id="clusters"></tbody>
+            </table>
+          </div>
+        </section>
+        <section data-meta>
           <h2>审计日志</h2>
           <div class="scroll">
             <table>

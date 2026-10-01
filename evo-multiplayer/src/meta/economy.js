@@ -306,6 +306,61 @@ export class Economy {
     return { paid };
   }
 
+  // Abuse signals for moderators (read-only; nothing is blocked
+  // automatically - a family sharing one router looks the same as a farm):
+  //  * receivers: who got the most coins from other players lately, from how
+  //    many senders, and how much of it came from accounts younger than 7 days
+  //    (the classic "farm alts for the starter grant, funnel to a main");
+  //  * clusters: registration IPs with several accounts, and how many coins
+  //    moved between accounts of the same cluster.
+  async flows({ hours = 24 } = {}) {
+    const now = Date.now();
+    const since = now - Math.min(24 * 30, Math.max(1, Number(hours) || 24)) * 3600000;
+    const young = now - 7 * 86400000;
+    const r = await this.store.query(
+      `SELECT l.to_acct AS acct, a.display AS name, sum(l.amount) AS received, count(DISTINCT l.from_acct) AS senders,
+              sum(CASE WHEN s.created > $2 THEN l.amount ELSE 0 END) AS from_young
+         FROM ledger l JOIN accounts a ON a.id = l.to_acct JOIN accounts s ON s.id = l.from_acct
+        WHERE l.at > $1 AND l.from_acct > 0 AND l.to_acct > 0
+        GROUP BY l.to_acct, a.display ORDER BY received DESC LIMIT 20`,
+      [since, young],
+    );
+    const receivers = r.rows.map((x) => {
+      const received = Number(x.received);
+      const fromYoung = Number(x.from_young);
+      const senders = Number(x.senders);
+      return {
+        id: Number(x.acct),
+        name: x.name,
+        received,
+        senders,
+        fromYoung,
+        suspicious: senders >= 3 && fromYoung >= received * 0.5,
+      };
+    });
+    const g = await this.store.query(
+      `SELECT reg_ip, count(*) AS n FROM accounts WHERE reg_ip <> '' GROUP BY reg_ip HAVING count(*) >= 3 ORDER BY count(*) DESC LIMIT 20`,
+      [],
+    );
+    const clusters = [];
+    for (const row of g.rows) {
+      const m = await this.store.query('SELECT id, display FROM accounts WHERE reg_ip = $1 ORDER BY id LIMIT 50', [row.reg_ip]);
+      const inner = await this.store.query(
+        `SELECT coalesce(sum(l.amount), 0) AS moved FROM ledger l
+           JOIN accounts f ON f.id = l.from_acct JOIN accounts t ON t.id = l.to_acct
+          WHERE f.reg_ip = $1 AND t.reg_ip = $1 AND l.at > $2`,
+        [row.reg_ip, since],
+      );
+      clusters.push({
+        accounts: Number(row.n),
+        names: m.rows.map((x) => x.display),
+        ids: m.rows.map((x) => Number(x.id)),
+        movedInside: Number(inner.rows[0].moved),
+      });
+    }
+    return { hours: Math.round((now - since) / 3600000), receivers, clusters };
+  }
+
   // Totals for the admin page (and the conservation check).
   async stats() {
     const b = await this.store.query('SELECT account, amount FROM balances WHERE account < 0');

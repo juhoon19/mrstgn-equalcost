@@ -95,7 +95,7 @@ public/         浏览器客户端（Canvas 2D，支持触屏）· social.js 账
 bench/          bots.js 压测机器人（同时校验协议一致性）· headless.js 无网络模拟调参 · meta-load.js 账号/社交层压测
 test/           单元测试 + 端到端真值对比
 deploy/         docker-compose.yml · Caddyfile · fly.toml
-scripts/        tunnel.sh 一键公网 · gen-cluster.mjs 生成大规模集群部署 · bots-fleet.sh 多机压测 · dev-bg.sh / dev-stop.sh
+scripts/        tunnel.sh 一键公网 · gen-cluster.mjs 生成大规模集群部署 · backup.sh / restore.sh 备份恢复 · bots-fleet.sh 多机压测 · dev-bg.sh / dev-stop.sh
 docs/           架构、协议、接入指南、部署、参考、压测
 ```
 

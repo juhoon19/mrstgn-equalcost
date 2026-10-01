@@ -24,6 +24,21 @@ import { CLIENT_METHODS, homeReplica } from './methods.js';
 
 export { CLIENT_METHODS };
 
+// The database may come up after us (container start order, failover):
+// wait for it instead of crashing, for up to DB_WAIT seconds.
+async function openStoreWithRetry(url, log, waitS = Number(process.env.DB_WAIT || 120)) {
+  const t0 = Date.now();
+  for (let delay = 500; ; delay = Math.min(5000, delay * 2)) {
+    try {
+      return await openStore(url);
+    } catch (err) {
+      if (Date.now() - t0 > waitS * 1000 || !/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|starting up|57P03|ECONNRESET/.test(`${err.code} ${err.message}`)) throw err;
+      log(`database not reachable yet (${err.code || err.message}); retrying`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 export async function startMeta(opts = {}) {
   const cfg = readClusterConfig();
   const id = Number(opts.id ?? cfg.get('meta-id', 'META_ID', 0));
@@ -39,7 +54,7 @@ export async function startMeta(opts = {}) {
   const M = urls.length;
   const home = (acct) => homeReplica(acct, M);
 
-  const store = opts.store ?? (await openStore(dbUrl));
+  const store = opts.store ?? (await openStoreWithRetry(dbUrl, log));
   const accounts = new Accounts(store, {
     log,
     registerPerHour: Number(opts.registerPerHour ?? cfg.get('register-per-hour', 'REGISTER_PER_IP_HOUR', 5)),
@@ -308,6 +323,7 @@ export async function startMeta(opts = {}) {
       await social.audit(who.id, 'set-role', `acct:${a.id}`, a.role);
     },
     'admin.audit': async (a, x) => (await requireRole(x.acct, ['mod', 'admin'], x.superuser)) && social.auditLog(),
+    'admin.flows': async (a, x) => (await requireRole(x.acct, ['mod', 'admin'], x.superuser)) && economy.flows({ hours: a.hours }),
     'admin.economy': async (a, x) => {
       await requireRole(x.acct, ['mod', 'admin'], x.superuser);
       const peersUp = [...peers.values()].filter((l) => l.open).length;
