@@ -115,6 +115,7 @@ test('register, session hello, guests cannot use account features', async () => 
   const guest = client(gw1);
   await guest.ready();
   assert.equal(guest.welcome.account, null);
+  assert.ok(guest.welcome.name.startsWith('游客·'), 'guests are marked when accounts exist');
   assert.ok(guest.welcome.pid >= 2 ** 30, 'guest ids are outside the account range');
   await assert.rejects(guest.rpc('wallet.get'), { code: 'LOGIN_REQUIRED' });
   await assert.rejects(guest.rpc('item.capture', { entityId: 1, x: 1, y: 1 }), { code: 'LOGIN_REQUIRED' });

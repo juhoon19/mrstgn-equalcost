@@ -870,6 +870,9 @@ export async function startGateway(opts = {}) {
     }
     c.pid = pid;
     c.name = cleanText(msg.name, 24) || `cell-${pid % 10000}`;
+    // With accounts on, guests are visibly marked so nobody can pose as a
+    // registered player in chat or on the leaderboard.
+    if (!c.acct && meta.enabled) c.name = `游客·${c.name.slice(0, 20)}`;
     const hue = Number(msg.hue);
     c.hue = Number.isFinite(hue) ? ((hue % 1) + 1) % 1 : (pid % 360) / 360;
     c.rgb = hueToRgb(c.hue);

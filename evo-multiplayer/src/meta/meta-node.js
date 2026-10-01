@@ -253,7 +253,8 @@ export async function startMeta(opts = {}) {
     'dm.read': (a, x) => social.markRead(need(x.acct), a.with),
     'player.find': async (a) => {
       const p = await accounts.byName(a.name);
-      return p ? { id: p.id, name: p.name, online: online.has(p.id) } : null;
+      // Online status is only shown to friends (friends.list), not to anyone.
+      return p ? { id: p.id, name: p.name } : null;
     },
     'report.create': (a, x) => social.report(need(x.acct), a.target, a.reason),
 
