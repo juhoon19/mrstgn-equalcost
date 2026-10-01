@@ -33,6 +33,7 @@
       <button data-tool="seed" title="播种你的谱系 (3)">🧬<span>播种</span></button>
       <button data-tool="stir" title="拖动搅动水流 (4)">🌀<span>搅动</span></button>
       <button data-tool="signal" title="释放信号素 (5)">📡<span>信号</span></button>
+      <button data-tool="capture" title="收集你谱系的生物到背包 (6)">🫙<span>收集</span></button>
       <button id="btn-chat" title="聊天 (Enter)">💬<span>聊天</span></button>
     </div>
 
@@ -43,6 +44,19 @@
 
     <canvas id="minimap" width="180" height="180"></canvas>
 
+    <div id="social" class="panel">
+      <button id="sb-account" title="账号">👤<span>登录</span></button>
+      <button id="sb-bag" title="背包">🎒<span>背包</span></button>
+      <button id="sb-market" title="市场">🏪<span>市场</span></button>
+      <button id="sb-trade" title="交易">🤝<span>交易</span></button>
+      <button id="sb-friends" title="好友与私信">👥<span>好友</span><i id="sb-friends-badge" class="badge hidden">0</i></button>
+    </div>
+    <div id="drawer" class="panel hidden">
+      <div class="drawer-head"><b id="drawer-title"></b><button id="drawer-close" title="关闭">✕</button></div>
+      <div id="drawer-body"></div>
+    </div>
+    <div id="toasts"></div>
+
     <div id="join" class="overlay">
       <div class="card">
         <h1>原始汤</h1>
@@ -50,7 +64,8 @@
         <label>名字 <input id="join-name" maxlength="24" placeholder="给你的谱系起个名" /></label>
         <label>颜色 <input id="join-hue" type="range" min="0" max="359" /></label>
         <div id="join-swatch"></div>
-        <button id="join-go">进入世界</button>
+        <button id="join-go">以游客身份进入</button>
+        <p class="hint">进入后点右侧 👤 可以注册 / 登录：收集生物、交易、加好友。</p>
         <p class="hint">滚轮 / 双指缩放 · 拖动平移 · 1–5 切换工具 · Enter 聊天</p>
       </div>
     </div>

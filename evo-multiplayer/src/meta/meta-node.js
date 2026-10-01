@@ -42,7 +42,27 @@ export async function startMeta(opts = {}) {
   const store = opts.store ?? (await openStore(dbUrl));
   const accounts = new Accounts(store, { log });
   const social = new Social(store);
-  const economy = new Economy(store, { notify: (acct, ev) => deliver(acct, ev) });
+  const economy = new Economy(store, {
+    notify: (acct, ev) => {
+      if (ev.type !== 'trade') return deliver(acct, ev);
+      enrichTrade(ev.trade)
+        .then((trade) => deliver(acct, { ...ev, trade }))
+        .catch(() => deliver(acct, ev));
+    },
+  });
+  // Trade views with names and item details, so clients can show exactly
+  // what is on the table.
+  async function enrichTrade(v) {
+    const ids = [...v.aItems, ...v.bItems];
+    const names = await store.query('SELECT id, display FROM accounts WHERE id = $1 OR id = $2', [v.a, v.b]);
+    const nameOf = Object.fromEntries(names.rows.map((r) => [Number(r.id), r.display]));
+    const items = {};
+    for (const id of ids) {
+      const r = await store.query('SELECT id, kind, data FROM items WHERE id = $1', [id]);
+      if (r.rows[0]) items[id] = { id, kind: r.rows[0].kind, data: JSON.parse(r.rows[0].data) };
+    }
+    return { ...v, aName: nameOf[v.a], bName: nameOf[v.b], items };
+  }
   const moderator = new Moderator({
     blocklist: loadBlocklist(opts.blocklist ?? cfg.get('blocklist', 'BLOCKLIST', '')),
     allowDomains: String(opts.allowDomains ?? cfg.get('allow-domains', 'ALLOW_DOMAINS', '')).split(',').filter(Boolean),
@@ -191,12 +211,16 @@ export async function startMeta(opts = {}) {
     'market.buy': (a, x) => economy.buy(need(x.acct), a.listing),
     'market.mine': (a, x) => economy.myListings(need(x.acct)),
 
-    'trade.open': (a, x) => economy.openTrade(need(x.acct), a.with, (p, q) => social.isBlocked(p, q)),
-    'trade.get': (a, x) => economy.getTrade(need(x.acct), a.id),
-    'trade.mine': (a, x) => economy.myTrades(need(x.acct)),
-    'trade.offer': (a, x) => economy.setOffer(need(x.acct), a.id, { items: a.items, coins: a.coins }),
-    'trade.confirm': (a, x) => economy.confirm(need(x.acct), a.id, a.version),
-    'trade.cancel': (a, x) => economy.cancelTrade(need(x.acct), a.id),
+    'trade.open': async (a, x) => {
+      const other = a.with ?? (await accounts.byName(a.name))?.id;
+      if (!other) throw new AppError('NOT_FOUND', '没有这个玩家');
+      return enrichTrade(await economy.openTrade(need(x.acct), other, (p, q) => social.isBlocked(p, q)));
+    },
+    'trade.get': async (a, x) => enrichTrade(await economy.getTrade(need(x.acct), a.id)),
+    'trade.mine': async (a, x) => Promise.all((await economy.myTrades(need(x.acct))).map(enrichTrade)),
+    'trade.offer': async (a, x) => enrichTrade(await economy.setOffer(need(x.acct), a.id, { items: a.items, coins: a.coins })),
+    'trade.confirm': async (a, x) => enrichTrade(await economy.confirm(need(x.acct), a.id, a.version)),
+    'trade.cancel': async (a, x) => enrichTrade(await economy.cancelTrade(need(x.acct), a.id)),
 
     'friends.list': async (a, x) => (await social.list(need(x.acct))).map((f) => ({ ...f, online: online.has(f.id) })),
     'friends.request': async (a, x) => {

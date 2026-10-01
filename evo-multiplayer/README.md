@@ -18,6 +18,8 @@ npm start                     # 默认：CPU 数自动决定分片/网关数量�
 
 常用参数：`node src/launch.js --shards 4 --gateways 2 --port 8080 --world 24x24`
 
+**账号、交易、聊天交友**：注册/登录（两步验证、恢复码）、把自己谱系的生物收进背包、市场买卖、玩家间交易、好友、私信、举报、自动审核和管理员后台都已内置，设计和实测见 [docs/accounts-social.md](docs/accounts-social.md)。单机默认用 SQLite（`data/meta.db`），上线设 `DATABASE_URL=postgres://...`。
+
 **要上 10 万人？** 看 [docs/scale-100k.md](docs/scale-100k.md)：哪里会先撑不住、对应的设计（分区网关、增量地图、人群上限……）、机器配置推算、带宽成本，以及上线前的 10 万机器人分布式压测流程。
 
 ## 放到公网（三选一）
@@ -57,7 +59,8 @@ npm start                     # 默认：CPU 数自动决定分片/网关数量�
 5. **世界不会因为重启而消失**：分片定期快照 + 停止时写最终快照，启动自动恢复；玩家身份密钥也持久化，谱系归属跨重启保留。分片崩溃会被自动拉起，玩家不掉线。
 6. **分区网关**：世界切成若干区，每个区一组网关，镜头跨区时客户端先连新区、再断旧连接（画面不中断）。每个网关只接收自己那一块世界，实测内部流量降为 1/3（2×2 区），区越多降得越多。
 7. **运维后台 + 管理工具**：`/admin`（设置 `ADMIN_TOKEN` 开启）可以看集群负载、区块归属图、全服聊天，一键禁言、踢出、封禁（可选连 IP）、解除，支持聊天屏蔽词。处罚在所有网关同时生效，重启不丢。
-8. **一切可测**：`npm test` 会启动真实的 4 分片 + 网关，连真实客户端，冻结模拟后逐个核对实体位置。
+8. **账号、经济、社交**：账号和世界身份打通（游客照样能玩），复式记账 + 幂等键保证钱不会凭空多出或少掉，市场和玩家交易都是单事务原子完成；好友、私信（隐私设置、屏蔽、限速）、服务器取证的举报；聊天自动拦截钓鱼链接和场外交易引流，多次违规自动禁言；版主/管理员分级权限，所有管理操作写审计日志。见 [docs/accounts-social.md](docs/accounts-social.md)。
+9. **一切可测**：`npm test` 会启动真实的 4 分片 + 网关，连真实客户端，冻结模拟后逐个核对实体位置。
 
 ## 实测（单台 4 核容器，分片/网关/压测机器人都挤在同一台）
 
@@ -67,6 +70,7 @@ npm start                     # 默认：CPU 数自动决定分片/网关数量�
 | 2 网关 2000 人 | 均分 999/1001，总出口 93 MB/s，RTT p50 ≈10ms / p95 ≈55ms，0 失步 |
 | 模拟 | ≈2.3 µs / 生物 / tick；2 分片各 1 万实体时触发时间膨胀（73% 速度），加分片即可 |
 | Docker Compose 4 分片 + 网关 | 跨容器运行、2×2 分片角落交接，0 失步 |
+| 账号/社交层（2 个 meta 副本 + PostgreSQL，1500 个并发账号） | 2898 次调用/秒，p50 13 ms / p99 95 ms，实时推送 5.6 万条 |
 | 热点（150 人挤进 4 分片中的一个象限） | 关闭均衡：热点分片 35ms/tick、其余 4–7ms；开启：81 次实时搬区块后四个分片各 15–22ms，0 失步 |
 
 每位玩家下行带宽 ≈ 视野内实体数 × ~25 字节/秒（画面里 450 个生物 ≈ 19 KB/s ≈ 150 kbps）。完整数据和方法见 [docs/benchmarks.md](docs/benchmarks.md)。
@@ -83,10 +87,12 @@ src/server/     shard-node.js 分片 · gateway-node.js 网关 · region.js 区�
                 coordinator.js 区块归属与负载均衡（运行在 0 号分片）
                 snapshot.js 快照编码 · link.js 内部连接 · game-loader.js
                 control.js 控制面：玩家名录、聊天记录、禁言/封禁（运行在 0 号分片）
+src/meta/       账号/经济/社交服务：meta-node.js（多副本）· store.js（PostgreSQL / SQLite）
+                accounts.js · ledger.js 复式账本 · economy.js 市场/交易/收集 · social.js · moderation.js
 src/game/       soup.js 演示游戏（替换成你的） · template.js 最小模板
 src/launch.js   单机一键启动（多进程）
-public/         浏览器客户端（Canvas 2D，支持触屏）· admin.html 运维后台
-bench/          bots.js 压测机器人（同时校验协议一致性）· headless.js 无网络模拟调参
+public/         浏览器客户端（Canvas 2D，支持触屏）· social.js 账号/背包/市场/交易/好友面板 · admin.html 运维后台
+bench/          bots.js 压测机器人（同时校验协议一致性）· headless.js 无网络模拟调参 · meta-load.js 账号/社交层压测
 test/           单元测试 + 端到端真值对比
 deploy/         docker-compose.yml · Caddyfile · fly.toml
 scripts/        tunnel.sh 一键公网 · gen-cluster.mjs 生成大规模集群部署 · bots-fleet.sh 多机压测 · dev-bg.sh / dev-stop.sh
@@ -96,9 +102,11 @@ docs/           架构、协议、接入指南、部署、参考、压测
 ## 常用命令
 
 ```bash
-npm test                                             # 34 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁、跨区切换
+npm test                                             # 44 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁、跨区切换、账号/交易/社交
+TEST_DATABASE_URL=postgres://… node --test --test-concurrency=1 test/economy.test.js test/meta.test.js   # 在 PostgreSQL 上再跑一遍（会清空该库）
 node bench/headless.js --shards 4 --world 16x16      # 不开网络，看生态/性能
 node bench/bots.js --url ws://localhost:8080/ws --n 500 --duration 60   # 压测
+node bench/meta-load.js --url ws://localhost:8080/ws --clients 500   # 账号/社交层压测（需调高 REGISTER_PER_IP_HOUR、MAX_PER_IP）
 curl localhost:8080/metrics                          # 网关指标
 curl localhost:9100/metrics                          # 分片指标（内网）
 ```

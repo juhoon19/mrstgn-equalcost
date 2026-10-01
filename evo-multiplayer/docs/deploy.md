@@ -121,10 +121,18 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `SUMMARY_MAX` | 世界概览最多多少格（每边） | 48 |
 | `BOOT_WAIT` | 0 号分片冷启动时最多等其他分片报到多久（毫秒） | 6000 |
 | `SHARDS` / `GATEWAYS` / `WORLD` | `launch.js` 单机启动用 | 自动 / 自动 / 24x24 |
+| `DATABASE_URL` | 账号/经济/社交数据库：`postgres://user:pass@host/db`，或 `sqlite:路径`（单机） | `launch.js`：`sqlite:data/meta.db` |
+| `META_URLS` | meta 副本地址列表 JSON，如 `["ws://meta0:9300","ws://meta1:9300"]`；网关、分片、meta 都要设成同一份。空 = 不启用账号系统 | `launch.js` 自动 |
+| `META_ID` | 这个 meta 进程是列表里的第几个 | 0 |
+| `META_REPLICAS` / `--meta` | `launch.js` 启动几个 meta 副本（多于 1 个需要 PostgreSQL；0 = 关闭账号系统） | 1 |
+| `WORLD_ID` | 世界编号，写进物品来源键。重置世界时换一个，旧物品就不会和新生物冲突 | `launch.js` 自动生成并存在 `data/secrets.json` |
+| `REWARD_CAP` / `REWARD_EVERY` | 每个账号每个分片每个周期最多奖励几枚 / 周期秒数（0 = 关闭奖励） | 3 / 60 |
+| `ALLOW_DOMAINS` | 聊天和私信里允许出现的链接域名（逗号分隔），其他链接一律拦截 | 空 |
+| `REGISTER_PER_IP_HOUR` | 同一 IP 每小时最多注册几个账号 | 5 |
 
 ## 运维后台与管理
 
-设置 `ADMIN_TOKEN` 后打开 `https://你的域名/admin`，输入口令即可：
+打开 `https://你的域名/admin`。两种登录方式：管理人员用自己的游戏账号登录（角色须是版主或管理员，见 [accounts-social.md](accounts-social.md)），或者输入 `ADMIN_TOKEN`（超级管理员）。启用账号系统后，后台还有举报、账号查询（余额、物品、登录设备、禁言/封号/改角色）、经济总览（含账目守恒检查）和审计日志。
 
 ![运维后台](admin.png)
 
@@ -146,9 +154,11 @@ API（都需要 `Authorization: Bearer <ADMIN_TOKEN>`）：`GET /admin/api/state
 - [ ] 设置 `ADMIN_TOKEN`（长随机串），上线后第一时间确认 `/admin` 能用。
 - [ ] 设置随机的 `CLUSTER_SECRET`、`TOKEN_SECRET`，并固定 `TOKEN_SECRET`（`launch.js` 未指定时会自动生成并存在 `data/secrets.json`）。
 - [ ] 备份 `DATA_DIR`（Docker 里是每个分片的 `shardN_data` 卷）：那就是整个世界。
+- [ ] **备份 PostgreSQL**（`pg_dump` 定时任务或 WAL 归档，存到另一台机器 / 对象存储）：那是玩家的全部账号和财产。单机 SQLite 就备份 `data/meta.db`。
+- [ ] 第一个管理员账号设好后，所有管理人员开启两步验证。
 - [ ] 分片端口只在内网；防火墙只开 80/443。
 - [ ] 走 HTTPS/WSS（Caddy/Cloudflare 自动处理）。
 - [ ] 在反代后面开 `TRUST_PROXY=true`，并按实际层数设 `PROXY_HOPS`（Caddy/Nginx 一层 = 1），或在 Cloudflare 后面设 `IP_HEADER=cf-connecting-ip`。否则单 IP 限制会误伤或被绕过。
 - [ ] 需要时设置 `ALLOWED_ORIGINS=https://你的域名`，防止别的网站嵌入你的服务器。
-- [ ] 聊天：已过滤控制字符、限长限速；如需敏感词过滤，在 `gateway-node.js` 的 `onClientJson` 里加。
+- [ ] 聊天：已过滤控制字符、限长限速，并经过自动审核（链接、场外交易、刷屏、屏蔽词）；屏蔽词放在 `BLOCKLIST` 文件里，允许的链接域名设 `ALLOW_DOMAINS`。
 - [ ] 监控：`/healthz`（存活）、网关与分片的 `/metrics`（JSON，可接 Prometheus 的 json exporter）。

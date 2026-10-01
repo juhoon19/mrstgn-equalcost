@@ -87,6 +87,7 @@ let stopping = false;
 const metaChildren = [];
 function startMeta(i) {
   const child = fork(path.join(HERE, 'meta/meta-node.js'), [], {
+    execArgv: ['--no-warnings'], // node:sqlite is flagged experimental
     env: { ...env, META_ID: String(i), PORT: String(metaBase + i), HOST: '127.0.0.1', DATABASE_URL: databaseUrl },
   });
   child.on('exit', (code) => {

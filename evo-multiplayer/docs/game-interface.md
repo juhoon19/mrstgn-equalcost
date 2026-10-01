@@ -23,6 +23,18 @@ export function decodeData(entity, reader) {}         // 对应反序列化
 export function react(region, chunk, dt) {}  // 每次化学步：直接改 chunk.field（反应、光照、源汇）
 ```
 
+可选（背包 / 交易，见 [accounts-social.md](accounts-social.md)）：
+
+```js
+// 玩家用“收集”工具点击实体时调用。返回可 JSON 序列化的数据就收进背包（实体随后被移除），返回 null 表示拒绝。
+// 一般只允许收集自己谱系的实体：if (e.owner !== pid) return null;
+export function captureEntity(region, e, pid) {}
+// 玩家从背包放生时调用：用 data（来自数据库，务必校验、夹到合理范围）生成实体并返回它，返回 null 表示拒绝。
+export function spawnFromItem(region, data, x, y, pid) {}
+```
+
+**原则：世界里的实体没有价值，只有物品有价值。** 物品里只放“可以安全复制回世界”的东西（演示游戏只存基因，不存能量），否则买卖物品就能往世界里注入资源。
+
 `src/server/game-loader.js` 启动时会检查必须的导出是否齐全。
 
 ## 实体（Entity）

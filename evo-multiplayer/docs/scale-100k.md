@@ -13,6 +13,7 @@
 | **模拟算力** | 100 万个实体需要几十个核 | 世界分片 + 动态负载均衡（热点区块自动搬到空闲分片）+ 时间膨胀兜底 |
 | **人群挤在同一处** | 一个区块被 10 万人操作、刷聊天 | 每区块每 tick 最多 20 次工具操作、32 个光标、64 条事件；聊天抄送后台按每分片每秒 100 条抽样；整个区的网关池可以单独扩容 |
 | **控制面消息** | 每次搬区块要给上百个进程各发一张 50 KB 的完整地图；进人高峰时注册消息数量成倍放大 | 地图只发增量（掉了版本的进程会主动要完整地图）；玩家注册每 50 ms 批量发一次；世界概览降采样到最多 48×48 格，缩小时每 2 秒发一次，其他情况每 6 秒发一次 |
+| **账号/交易/社交** | 每次调用都要落库；私信推送要跨网关找到对方 | 独立的 meta 层：多个无状态副本 + PostgreSQL，按账号 id 路由，副本之间转发推送。10 万人约 4 个副本 + 一主一备数据库，见 [accounts-social.md](accounts-social.md) |
 | **入口负载均衡 / TLS** | 单个 Caddy 撑不住 16 Gbit/s | 前面用云厂商的四层负载均衡（或 DNS 轮询多台 Caddy / Cloudflare）。网关本身无状态，不需要粘性会话 |
 
 ## 2. 实测的单位成本（4 核机器，服务端和机器人在同一台）
@@ -38,13 +39,15 @@
 | 0 号分片（协调 + 控制面） | 1（和其他分片同类） | 建议放在单独的机器上 | 每秒 64 份负载报告；10 万条玩家名录约 30 MB 内存 |
 | 入口 | 云四层负载均衡，或 2–4 台 Caddy | — | 16 Gbit/s TLS |
 | 内部网络 | 分片 ↔ 网关之间万兆内网 | — | 有分区时内部流量约为对外流量的 1/10–1/5 |
+| meta（账号/交易/社交） | 4 个副本 | 2 台 8 核 | 实测 4 核上（与其他服务混跑）约 3000 次调用/秒；10 万人按每人每 20 秒一次 ≈ 5000 次/秒 |
+| PostgreSQL | 1 主 1 备 | 8–16 核、NVMe | 写入主要是私信和账本，每秒几千行；私信表按月分区 |
 
 生成这套部署文件：
 
 ```bash
-node scripts/gen-cluster.mjs --shards 64 --zones 4x4 --gw-per-zone 3 --lobby 4 --world 128x128 --out deploy/generated
+node scripts/gen-cluster.mjs --shards 64 --zones 4x4 --gw-per-zone 3 --lobby 4 --world 128x128 --meta 4 --out deploy/generated
 # 单机或 Swarm：
-cd deploy/generated && DOMAIN=... CLUSTER_SECRET=... TOKEN_SECRET=... ADMIN_TOKEN=... docker compose up -d
+cd deploy/generated && DOMAIN=... CLUSTER_SECRET=... TOKEN_SECRET=... WORLD_ID=... POSTGRES_PASSWORD=... ADMIN_TOKEN=... docker compose up -d
 # 多台机器：docker swarm init / join 之后
 docker stack deploy -c docker-compose.yml soup
 ```

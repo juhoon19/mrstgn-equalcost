@@ -386,6 +386,7 @@ export async function startGateway(opts = {}) {
   }
 
   const registrations = new Map(); // ip -> [t]
+  const registerPerHour = Number(opts.registerPerHour ?? cfg.get('register-per-hour', 'REGISTER_PER_IP_HOUR', 5));
   function rpcReply(c, id, body) {
     send(c, JSON.stringify({ t: 'rpcr', id, ...body }));
   }
@@ -405,7 +406,7 @@ export async function startGateway(opts = {}) {
         if (m === 'auth.register') {
           const now = Date.now();
           const list = (registrations.get(c.ip) || []).filter((t) => now - t < 3600000);
-          if (list.length >= 5) throw new MetaError('RATE', '这个网络注册太频繁，请稍后再试');
+          if (list.length >= registerPerHour) throw new MetaError('RATE', '这个网络注册太频繁，请稍后再试');
           list.push(now);
           registrations.set(c.ip, list);
           if (registrations.size > 100000) registrations.clear();

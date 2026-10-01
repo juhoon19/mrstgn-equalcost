@@ -3,7 +3,11 @@
 #
 #   cd deploy
 #   DOMAIN=soup.example.com CLUSTER_SECRET=$(openssl rand -hex 16) \
-#   TOKEN_SECRET=$(openssl rand -hex 16) docker compose up -d --scale gateway=3
+#   TOKEN_SECRET=$(openssl rand -hex 16) WORLD_ID=$(openssl rand -hex 6) \
+#   POSTGRES_PASSWORD=$(openssl rand -hex 16) docker compose up -d --scale gateway=3
+#
+# Accounts / trading / friends: two meta replicas on one PostgreSQL. Back up
+# the postgres volume (pg_dump) - it holds everything players own.
 #
 # Every service reads the same TOPOLOGY; shard i must be reachable at
 # shards[i]. To move shards onto other machines, change their URLs.
@@ -16,6 +20,9 @@ x-common: &common
     TOPOLOGY: '{"world":{"chunksX":32,"chunksY":32},"shards":["ws://shard0:9100","ws://shard1:9100","ws://shard2:9100","ws://shard3:9100"]}'
     CLUSTER_SECRET: ${CLUSTER_SECRET:?set CLUSTER_SECRET}
     TOKEN_SECRET: ${TOKEN_SECRET:?set TOKEN_SECRET}
+    WORLD_ID: ${WORLD_ID:?set WORLD_ID}
+    META_URLS: '["ws://meta0:9300","ws://meta1:9300"]'
+    ADMIN_TOKEN: ${ADMIN_TOKEN:-}
     GAME: soup
     QUIET: 'true'
   networks: [internal]
@@ -46,11 +53,31 @@ services:
     volumes: ['shard3_data:/data']
     stop_grace_period: 20s # shards write a final snapshot on SIGTERM
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: evo
+      POSTGRES_DB: evo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes: ['pg_data:/var/lib/postgresql/data']
+    networks: [internal]
+  meta0:
+    <<: *common
+    command: ['node', '--no-warnings', 'src/meta/meta-node.js']
+    environment: { <<: *env, META_ID: '0', HOST: '0.0.0.0', PORT: '9300', DATABASE_URL: 'postgres://evo:${POSTGRES_PASSWORD}@postgres/evo' }
+    depends_on: [postgres]
+  meta1:
+    <<: *common
+    command: ['node', '--no-warnings', 'src/meta/meta-node.js']
+    environment: { <<: *env, META_ID: '1', HOST: '0.0.0.0', PORT: '9300', DATABASE_URL: 'postgres://evo:${POSTGRES_PASSWORD}@postgres/evo' }
+    depends_on: [postgres]
+
   gateway:
     <<: *common
     command: ['node', 'src/server/gateway-node.js']
     environment: { <<: *env, PORT: '8080', HOST: '0.0.0.0', TRUST_PROXY: 'true', MAX_PER_IP: '16' }
-    depends_on: [shard0, shard1, shard2, shard3]
+    depends_on: [shard0, shard1, shard2, shard3, meta0, meta1]
 
   caddy:
     image: caddy:2
@@ -69,6 +96,7 @@ networks:
 
 volumes:
   caddy_data: {}
+  pg_data: {}
   shard0_data: {}
   shard1_data: {}
   shard2_data: {}

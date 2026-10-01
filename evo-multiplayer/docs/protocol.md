@@ -4,11 +4,14 @@ WebSocket，路径 `/ws`。二进制消息第一个字节是类型；文本消�
 
 ## 握手（JSON）
 
-客户端 → `{"t":"hello","name":"阿星","hue":0.33,"token":"<上次 welcome 给的 token，可省>"}`
+客户端 → `{"t":"hello","name":"阿星","hue":0.33,"token":"<上次 welcome 给的 token，可省>","session":"<登录会话 token，可省>"}`
+
+带 `session` 且有效时，玩家以账号身份进入：`pid` = 账号 id，名字和颜色取自账号，`welcome.account` 是账号信息；无效时以游客身份进入，并收到一条 `{"t":"ev","ev":{"type":"session-expired"}}`。游客的 `pid` 在 `[2^30, 2^31)` 范围内。
 
 服务器 → `{"t":"welcome","v":1,"pid":123,"token":"123.xxxx","name":"阿星","hue":0.33,"rgb":…,
 "world":{"chunksX":24,"chunksY":24,"chunkSize":256,"fieldRes":16,"channels":3},
-"posQuant":8,"netHz":10,"maxChunks":30,"maxChunksLo":80,"viewMargin":96,"cooldowns":{"1":250,…},"gateway":"ab12cd34"}`
+"posQuant":8,"netHz":10,"maxChunks":30,"maxChunksLo":80,"viewMargin":96,"cooldowns":{"1":250,…},"gateway":"ab12cd34","zones":null,"zone":-1,
+"account":{"id":7,"name":"阿星","role":"player","hue":0.33,"totp":false,"privacyDm":"everyone","mutedUntil":0} 或 null,"meta":true}`
 
 10 秒内不发 hello 会被断开。
 
@@ -20,7 +23,8 @@ WebSocket，路径 `/ws`。二进制消息第一个字节是类型；文本消�
 | 11 | `C_ACTION` | u8 工具, f32 x, y, dx, dy | 按冷却 |
 | 12 | `C_CURSOR` | f32 x, y | ≤7/秒 |
 | 13 | `C_PING` | u32 任意值（原样返回） | 1/秒 |
-| JSON | 聊天 | `{"t":"chat","text":"…"}` ≤200 字，1.2 秒一条 | |
+| JSON | 聊天 | `{"t":"chat","text":"…"}` ≤200 字，1.2 秒一条；经过自动审核，被拦截时收到 `notice` | |
+| JSON | 调用 | `{"t":"rpc","id":1,"m":"dm.send","a":{"to":7,"text":"hi"}}`，每连接 5 次/秒（突发 20） | |
 
 工具编号：1 营养、2 播种、3 搅动（dx,dy 为方向）、4 信号素。消息 > 4KB 会被断开连接；超速消息被丢弃，持续超速会被断开。
 
@@ -35,6 +39,26 @@ WebSocket，路径 `/ws`。二进制消息第一个字节是类型；文本消�
 | 4 | `S_PONG` | u32 回显 |
 | 5 | `S_EVENTS` | 区块的光标与一次性事件（下详） |
 | JSON | `stats` | `{"t":"stats","online","cells","entities","tidi","top":[[pid,name,count],…]}` 每秒 |
+| JSON | `rpcr` | 调用结果：`{"t":"rpcr","id":1,"ok":true,"r":…}` 或 `{"t":"rpcr","id":1,"ok":false,"code":"BLOCKED","msg":"对方不接收你的消息"}` |
+| JSON | `ev` | 实时推送：`{"t":"ev","ev":{"type":…}}`，type 有 `dm`、`friend`、`presence`、`trade`、`sold`、`muted`、`banned`、`session-expired` |
+| JSON | `notice` | 系统提示文字 |
+
+关闭码：4001 被踢出（10 秒后可重连），4003 被封禁（不要重连），4004 同一账号在别的页面打开。
+
+### 调用（rpc）方法
+
+全部列表在 `src/meta/methods.js`（`CLIENT_METHODS`，`true` = 需要登录），名字之外的方法一律被网关拒绝。
+
+| 类别 | 方法 |
+|---|---|
+| 账号 | `auth.register {name,password,hue}` → `{account,token,recoveryCodes}`；`auth.login {name,password,totp?}` → `{account,token}`；`auth.recover {name,code,newPassword}`；`auth.logout`；`auth.logoutAll`；`auth.sessions`；`auth.password {old,new}`；`auth.totpSetup` → `{secret,uri}`；`auth.totpEnable {code}`；`auth.totpDisable {code}`；`auth.privacy {dm:"everyone"/"friends"/"nobody"}`；`auth.me` |
+| 背包 | `wallet.get` → `{balance,items}`；`item.capture {entityId,x,y}`（只能收集自己谱系、视野内的生物）；`item.release {item,x,y}` |
+| 市场 | `market.browse {maxPrice?,page?}`；`market.list {item,price}`；`market.cancel {listing}`；`market.buy {listing}`；`market.mine` |
+| 交易 | `trade.open {with 或 name}`；`trade.get {id}`；`trade.mine`；`trade.offer {id,items,coins}`；`trade.confirm {id,version}`；`trade.cancel {id}` |
+| 好友 | `friends.list`；`friends.request {to 或 name}`；`friends.respond {from,accept}`；`friends.remove {id}`；`block.add {id}`；`block.remove {id}`；`block.list`；`player.find {name}` |
+| 私信 | `dm.send {to,text}`；`dm.history {with,before?}`；`dm.unread`；`dm.read {with}`；`report.create {target,reason}` |
+
+登录 / 注册成功后，客户端把 token 存起来，重新连接并在 hello 里带上 `session`（身份变了，世界里的 pid 也要换）。
 
 ### S_CHUNK
 

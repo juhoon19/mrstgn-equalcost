@@ -156,15 +156,23 @@
     <header>
       <h1>原始汤 · 运维后台</h1>
       <span id="status" class="muted">未登录</span>
+      <span id="whoami" class="muted"></span>
       <span style="flex: 1"></span>
       <label class="muted">负载均衡 <input type="checkbox" id="balance" /></label>
       <button id="logout">退出</button>
     </header>
 
     <section id="login">
-      <h2>管理员口令（服务器的 ADMIN_TOKEN）</h2>
-      <form id="login-form"><input id="token" type="password" style="width: 100%" autocomplete="current-password" /></form>
-      <p class="muted">口令只保存在本页的会话里。</p>
+      <h2>管理人员账号登录（版主 / 管理员）</h2>
+      <form id="staff-form" style="display: grid; gap: 6px">
+        <input id="s-name" placeholder="用户名" autocomplete="username" />
+        <input id="s-pass" type="password" placeholder="密码" autocomplete="current-password" />
+        <input id="s-totp" placeholder="两步验证码（如已开启）" inputmode="numeric" maxlength="6" />
+        <button>登录</button>
+      </form>
+      <h2 style="margin-top: 16px">或：服务器口令（ADMIN_TOKEN，超级管理员）</h2>
+      <form id="login-form"><input id="token" type="password" style="width: 100%" autocomplete="off" /></form>
+      <p class="muted">凭据只保存在本页的会话里。版主可以禁言 / 踢人 / 处理举报；封禁、改角色、搬迁区块需要管理员。所有操作都会写入审计日志。</p>
       <p id="login-err" class="err"></p>
     </section>
 
@@ -221,6 +229,42 @@
             <table>
               <thead><tr><th>pid</th><th>名字</th><th>网关</th><th>最近在线</th><th>操作</th></tr></thead>
               <tbody id="players"></tbody>
+            </table>
+          </div>
+        </section>
+        <section data-meta>
+          <h2>举报（待处理）</h2>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>时间</th><th>举报人</th><th>被举报</th><th>原因 / 证据</th><th>操作</th></tr></thead>
+              <tbody id="reports"></tbody>
+            </table>
+          </div>
+        </section>
+        <section data-meta>
+          <h2>账号</h2>
+          <form id="acct-form" style="display: flex; gap: 6px; margin-bottom: 8px">
+            <input id="acct-q" placeholder="用户名" style="flex: 1" />
+            <button>查询</button>
+          </form>
+          <div id="acct"></div>
+        </section>
+        <section data-meta>
+          <h2>经济</h2>
+          <div class="kpis">
+            <div class="kpi"><b id="e-circ">–</b><span>流通货币</span></div>
+            <div class="kpi"><b id="e-minted">–</b><span>累计发行</span></div>
+            <div class="kpi"><b id="e-sunk">–</b><span>累计回收（手续费）</span></div>
+            <div class="kpi"><b id="e-items">–</b><span>物品 / 在售</span></div>
+          </div>
+          <p id="e-check" class="muted"></p>
+        </section>
+        <section data-meta>
+          <h2>审计日志</h2>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>时间</th><th>执行者</th><th>操作</th><th>对象</th><th>详情</th></tr></thead>
+              <tbody id="audit"></tbody>
             </table>
           </div>
         </section>

@@ -1,6 +1,7 @@
 // Accounts, social, trading and moderation end to end: 2 meta replicas,
 // 1 shard, 2 gateways; players on different gateways whose accounts live on
-// different replicas. Set TEST_DATABASE_URL=postgres://... to run on Postgres.
+// different replicas. Set TEST_DATABASE_URL=postgres://... to run on Postgres
+// (that database is truncated; run Postgres files with --test-concurrency=1).
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';

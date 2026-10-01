@@ -27,6 +27,7 @@ import {
 } from '/shared/protocol.js';
 import { Reader } from '/shared/codec.js';
 import { hueToRgb, rgbToCss } from '/shared/color.js';
+import { initSocial } from './social.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -116,6 +117,7 @@ function helloMessage() {
     name: store.get('name', ''),
     hue: Number(store.get('hue', 0)) / 360,
     token: store.get('token', ''),
+    session: store.get('session', ''),
   });
 }
 
@@ -137,6 +139,11 @@ function onActiveClose(sock, ev) {
     setStatus('已被封禁');
     addChatLine('系统', '你已被管理员封禁，无法进入。');
     return; // don't hammer the server
+  }
+  if (ev.code === 4004) {
+    setStatus('已在别处打开');
+    addChatLine('系统', '这个账号在另一个页面打开了。刷新本页可以切回来。');
+    return;
   }
   if (ev.code === 4001) {
     setStatus('已被踢出');
@@ -221,6 +228,7 @@ function finishZoneSwitch(sw) {
   world = sw.world;
   welcome = sw.welcome;
   store.set('token', welcome.token);
+  social.onWelcome(welcome);
   ws.onmessage = (ev) => onMessage(ev.data);
   ws.onclose = (ev) => onActiveClose(sw.ws, ev);
   fieldImages.clear();
@@ -241,6 +249,8 @@ function onMessage(data) {
     if (msg.t === 'welcome') onWelcome(msg);
     else if (msg.t === 'stats') onStats(msg);
     else if (msg.t === 'notice') addChatLine('系统', msg.text);
+    else if (msg.t === 'rpcr') social.onRpcReply(msg);
+    else if (msg.t === 'ev') social.onEvent(msg.ev);
     return;
   }
   bytesIn += data.byteLength;
@@ -300,6 +310,7 @@ function onWelcome(msg) {
   clampCam();
   viewDirty = true;
   setStatus(msg.zones && msg.zone >= 0 ? `在线 · ${msg.zone + 1} 区` : '在线');
+  social.onWelcome(msg);
 }
 
 function onStats(msg) {
@@ -427,6 +438,59 @@ for (const b of toolButtons) {
 }
 selectTool('nutrient');
 
+// Read-only handles for automated UI tests and the browser console.
+globalThis.soupDebug = {
+  get cam() {
+    return cam;
+  },
+  get world() {
+    return world;
+  },
+  get pid() {
+    return welcome && welcome.pid;
+  },
+  screenOf(x, y) {
+    return [(x - cam.x) * cam.zoom + W / 2, (y - cam.y) * cam.zoom + H / 2];
+  },
+};
+
+// Accounts, inventory, market, trades, friends (public/social.js).
+const social = initSocial({
+  store,
+  send(obj) {
+    if (!ws || ws.readyState !== 1 || !connected) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
+  },
+  // Log in / out: reconnect with the new session (identity changes).
+  relogin() {
+    if (ws) {
+      ws.onclose = null;
+      ws.close(1000, 'relogin');
+    }
+    connected = false;
+    $('join').classList.add('hidden');
+    store.set('joined', '1');
+    connect();
+  },
+  nearestOwn(x, y) {
+    if (!world || !welcome) return null;
+    const R = Math.max(10, 24 / cam.zoom);
+    let best = null;
+    let bd = R * R;
+    for (const e of world.entities.values()) {
+      if (e.owner !== welcome.pid) continue;
+      const d = (e.x - x) ** 2 + (e.y - y) ** 2;
+      if (d < bd + e.r * e.r) {
+        bd = d;
+        best = e;
+      }
+    }
+    return best;
+  },
+  setTool: (t) => selectTool(t),
+});
+
 const TOOL_ACTION = { nutrient: ACTIONS.NUTRIENT, seed: ACTIONS.SEED, stir: ACTIONS.STIR, signal: ACTIONS.SIGNAL };
 
 function useTool(x, y, dx = 0, dy = 0) {
@@ -458,6 +522,8 @@ canvas.addEventListener('pointerdown', (e) => {
     canvas.style.cursor = 'grabbing';
   } else if (tool === 'stir') {
     drag = { mode: 'stir', wx, wy, sx: e.clientX, sy: e.clientY };
+  } else if (tool === 'capture' || tool === 'release') {
+    social.onMapClick(tool, wx, wy);
   } else {
     drag = { mode: 'paint' };
     useTool(wx, wy);
@@ -557,9 +623,14 @@ chatInput.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (document.activeElement === chatInput || document.activeElement === nameInput) return;
-  const keys = { 1: 'pan', 2: 'nutrient', 3: 'seed', 4: 'stir', 5: 'signal' };
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  const keys = { 1: 'pan', 2: 'nutrient', 3: 'seed', 4: 'stir', 5: 'signal', 6: 'capture' };
   if (keys[e.key]) selectTool(keys[e.key]);
+  else if (e.key === 'Escape' && tool === 'release') {
+    social.cancelRelease();
+    selectTool('pan');
+  }
   else if (e.key === 'Enter') {
     e.preventDefault();
     openChat();
