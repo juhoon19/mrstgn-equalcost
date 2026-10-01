@@ -40,9 +40,9 @@ before(async () => {
   const url = process.env.TEST_DATABASE_URL || 'sqlite::memory:';
   store = await openStore(url);
   if (url.startsWith('postgres')) {
-    await store.exec('TRUNCATE accounts, sessions, balances, ledger, items, item_log, listings, trades, friends, blocks, messages, reports, audit RESTART IDENTITY');
+    await store.exec('TRUNCATE accounts, sessions, balances, ledger, items, item_log, listings, trades, friends, blocks, messages, reports, audit, throttle RESTART IDENTITY');
   }
-  metas = await Promise.all(metaUrls.map((u, i) => startMeta({ id: i, urls: metaUrls, port: base + 10 + i, secret, store, quiet: true })));
+  metas = await Promise.all(metaUrls.map((u, i) => startMeta({ id: i, urls: metaUrls, port: base + 10 + i, secret, store, quiet: true, registerPerHour: 1000 })));
   const game = await loadGame('soup');
   shard = await startShard({ shard: 0, port: base, topology, secret, game, quiet: true, balance: false, metaUrls, worldId: 'test', rewardEvery: 0.5, rewardCap: 3 });
   const g = () => startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, adminToken: ADMIN, maxPerIp: 100, metaUrls, registerPerHour: 1000 });
@@ -419,7 +419,7 @@ test('meta replica failure: calls fail over, presence recovers when it returns',
   assert.equal(typeof w.balance, 'number', 'another replica serves the call');
   await ivy.rpc('dm.send', { to: hal.welcome.pid, text: 'stored while home is down' });
   // Bring it back on the same port.
-  metas[h] = await startMeta({ id: h, urls: metaUrls, port: base + 10 + h, secret, store, quiet: true });
+  metas[h] = await startMeta({ id: h, urls: metaUrls, port: base + 10 + h, secret, store, quiet: true, registerPerHour: 1000 });
   assert.ok(
     await until(async () => (await ivy.rpc('friends.list')).find((f) => f.name === 'hal')?.online === true, 8000),
     'gateways re-announce hal after the replica restarts',
@@ -430,4 +430,18 @@ test('meta replica failure: calls fail over, presence recovers when it returns',
   assert.ok(await until(() => hal.events.some((e) => e.type === 'dm' && e.msg.text === 'live again')), 'live delivery resumes');
   hal.close();
   ivy.close();
+});
+
+test('housekeeping removes expired sessions and messages past retention, nothing else', async () => {
+  const before = (await store.query('SELECT count(*) AS n FROM messages')).rows[0].n;
+  const sess = (await store.query('SELECT count(*) AS n FROM sessions')).rows[0].n;
+  // Pretend two years have passed: every session expired, every message is old.
+  const r = await metas[0].housekeep(Date.now() + 2 * 365 * 86400000);
+  assert.equal(r.sessions, Number(sess));
+  assert.equal(r.messages, Number(before));
+  assert.ok(Number(before) > 0);
+  // Money and items are never touched.
+  const st = await adminHttp(gw1, 'meta/economy');
+  assert.equal(st.body.balanceSum, 0);
+  assert.ok(st.body.items >= 1);
 });

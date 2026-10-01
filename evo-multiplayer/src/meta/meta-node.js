@@ -40,7 +40,11 @@ export async function startMeta(opts = {}) {
   const home = (acct) => homeReplica(acct, M);
 
   const store = opts.store ?? (await openStore(dbUrl));
-  const accounts = new Accounts(store, { log });
+  const accounts = new Accounts(store, {
+    log,
+    registerPerHour: Number(opts.registerPerHour ?? cfg.get('register-per-hour', 'REGISTER_PER_IP_HOUR', 5)),
+    pepper: secret, // IPs are stored only as keyed hashes
+  });
   const social = new Social(store);
   const economy = new Economy(store, {
     notify: (acct, ev) => {
@@ -195,7 +199,7 @@ export async function startMeta(opts = {}) {
   }
 
   const methods = {
-    'auth.register': (a, x) => accounts.register({ name: a.name, password: a.password, hue: a.hue, ua: x.ua }),
+    'auth.register': (a, x) => accounts.register({ name: a.name, password: a.password, hue: a.hue, ua: x.ua, ip: x.ip }),
     'auth.login': (a, x) => accounts.login({ name: a.name, password: a.password, totp: a.totp, ua: x.ua, ip: x.ip }),
     'auth.recover': (a, x) => accounts.recover({ name: a.name, code: a.code, newPassword: a.newPassword, ua: x.ua, ip: x.ip }),
     'auth.resume': (a) => accounts.resume(a.token),
@@ -334,6 +338,32 @@ export async function startMeta(opts = {}) {
     }
   }
 
+  // --------------------------------------------------------- housekeeping
+  // Every replica runs it (staggered); the deletes are idempotent and in
+  // small batches so a big table is never locked for long.
+  const retentionDays = Number(opts.messageRetentionDays ?? cfg.get('message-retention-days', 'MESSAGE_RETENTION_DAYS', 365));
+  async function deleteBatched(table, where, params) {
+    let total = 0;
+    for (;;) {
+      const r = await store.query(`DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} WHERE ${where} LIMIT 2000)`, params);
+      total += r.count;
+      if (r.count < 2000) return total;
+    }
+  }
+  async function housekeep(now = Date.now()) {
+    const out = {};
+    out.sessions = (await store.query('DELETE FROM sessions WHERE expires < $1', [now])).count;
+    out.throttle = (await store.query('DELETE FROM throttle WHERE t < $1', [now - 3600000])).count;
+    out.messages = retentionDays > 0 ? await deleteBatched('messages', 'at < $1', [now - retentionDays * 86400000]) : 0;
+    if (out.sessions || out.messages) log(`housekeeping: ${out.sessions} expired sessions, ${out.messages} old messages removed`);
+    return out;
+  }
+  const housekeepTimer = setInterval(
+    () => housekeep().catch((err) => log('housekeeping failed', err.message)),
+    10 * 60000 + id * 37000,
+  );
+  housekeepTimer.unref();
+
   // ------------------------------------------------------------ transport
   const server = http.createServer((req, res) => {
     if (req.url === '/healthz') return res.end('ok');
@@ -394,7 +424,9 @@ export async function startMeta(opts = {}) {
     economy,
     social,
     online,
+    housekeep,
     async close() {
+      clearInterval(housekeepTimer);
       for (const l of peers.values()) l.close();
       for (const ws of wss.clients) ws.terminate();
       wss.close();

@@ -129,7 +129,8 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `WORLD_ID` | 世界编号，写进物品来源键。重置世界时换一个，旧物品就不会和新生物冲突 | `launch.js` 自动生成并存在 `data/secrets.json` |
 | `REWARD_CAP` / `REWARD_EVERY` | 每个账号每个分片每个周期最多奖励几枚 / 周期秒数（0 = 关闭奖励） | 3 / 60 |
 | `ALLOW_DOMAINS` | 聊天和私信里允许出现的链接域名（逗号分隔），其他链接一律拦截 | 空 |
-| `REGISTER_PER_IP_HOUR` | 同一 IP 每小时最多注册几个账号（每个网关各自计数） | 5 |
+| `REGISTER_PER_IP_HOUR` | 同一 IP 每小时最多注册几个账号（计数存在数据库里，所有网关和副本共用） | 5 |
+| `MESSAGE_RETENTION_DAYS` | 私信保留天数，过期自动删除（0 = 永久保留） | 365 |
 | `GUESTS_CAN_CHAT` | 设成 `false` 后只有登录玩家能聊天（游客仍然能玩） | true |
 
 ## 运维后台与管理

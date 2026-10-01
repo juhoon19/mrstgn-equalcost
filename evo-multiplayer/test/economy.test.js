@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openStore } from '../src/meta/store.js';
+import { openStore, SCHEMA_VERSION } from '../src/meta/store.js';
 import { Accounts, STARTER_GRANT } from '../src/meta/accounts.js';
 import { Economy, MARKET_FEE, RELEASE_FEE } from '../src/meta/economy.js';
 import { mint, move } from '../src/meta/ledger.js';
@@ -15,7 +15,7 @@ if (process.env.TEST_DATABASE_URL) urls.push(process.env.TEST_DATABASE_URL);
 async function freshPg(url) {
   // Isolate each run in its own schema-free database state.
   const s = await openStore(url);
-  await s.exec('TRUNCATE accounts, sessions, balances, ledger, items, item_log, listings, trades, friends, blocks, messages, reports, audit RESTART IDENTITY');
+  await s.exec('TRUNCATE accounts, sessions, balances, ledger, items, item_log, listings, trades, friends, blocks, messages, reports, audit, throttle RESTART IDENTITY');
   return s;
 }
 
@@ -86,6 +86,34 @@ for (const url of urls) {
     await acc.totpEnable(id, totp(secret));
     await assert.rejects(acc.login({ name: '阿星', password: 'new password!', ip: '2' }), { code: 'TOTP_REQUIRED' });
     await assert.rejects(acc.login({ name: '阿星', password: 'new password!', ip: '2', totp: totp(secret) }), { code: 'BAD_TOTP' }, 'replayed code accepted');
+    await store.close();
+  });
+
+  test(`[${kind}] security state is shared by replicas: TOTP replay, login throttle, registrations per IP`, async () => {
+    const store = url.startsWith('postgres') ? await freshPg(url) : await openStore(url);
+    // Two Accounts objects on one database = two meta replicas.
+    const r1 = new Accounts(store, { registerPerHour: 3, pepper: 'p' });
+    const r2 = new Accounts(store, { registerPerHour: 3, pepper: 'p' });
+    const reg = await r1.register({ name: 'shared', password: 'password123', ip: '10.0.0.1' });
+    const id = reg.account.id;
+    const { secret } = await r1.totpSetup(id);
+    const code = totp(secret);
+    await r1.totpEnable(id, code);
+    // The same code used on the other replica is a replay.
+    await assert.rejects(r2.login({ name: 'shared', password: 'password123', totp: code, ip: '1' }), { code: 'BAD_TOTP' });
+    // Failures counted on one replica lock the name on the other.
+    for (let i = 0; i < 10; i++) await (i % 2 ? r1 : r2).login({ name: 'shared', password: 'wrong', ip: `x${i}` }).catch(() => {});
+    await assert.rejects(r2.login({ name: 'shared', password: 'password123', ip: 'fresh' }), { code: 'THROTTLED' });
+    // Registrations from one IP are counted across replicas.
+    await r2.register({ name: 'shared2', password: 'password123', ip: '10.0.0.1' });
+    await r1.register({ name: 'shared3', password: 'password123', ip: '10.0.0.1' });
+    await assert.rejects(r2.register({ name: 'shared4', password: 'password123', ip: '10.0.0.1' }), { code: 'RATE' });
+    await r2.register({ name: 'shared5', password: 'password123', ip: '10.0.0.2' });
+    // IPs are stored only as keyed hashes.
+    const raw = await store.query("SELECT reg_ip FROM accounts WHERE name_lc = 'shared'");
+    assert.ok(raw.rows[0].reg_ip && !raw.rows[0].reg_ip.includes('10.0.0.1'));
+    const v = await store.query('SELECT max(v) AS v FROM schema_version');
+    assert.equal(Number(v.rows[0].v), SCHEMA_VERSION);
     await store.close();
   });
 

@@ -274,15 +274,61 @@ CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
 `;
 }
 
+// Schema changes after the first release. Append only: never edit or
+// reorder a shipped entry. Each runs once, in order, inside the same lock,
+// and the version is recorded in schema_version.
+function migrations(kind) {
+  void kind;
+  return [
+    {
+      v: 2,
+      why: 'security state shared by all replicas: TOTP replay, login throttle, registrations per IP; cleanup indexes',
+      sql: `
+ALTER TABLE accounts ADD COLUMN totp_last BIGINT NOT NULL DEFAULT -1;
+ALTER TABLE accounts ADD COLUMN reg_ip TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS accounts_reg_ip ON accounts(reg_ip, created);
+CREATE TABLE IF NOT EXISTS throttle (
+  key TEXT PRIMARY KEY,
+  n INTEGER NOT NULL,
+  t BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires);
+CREATE INDEX IF NOT EXISTS messages_at ON messages(at);
+`,
+    },
+  ];
+}
+
+export const SCHEMA_VERSION = 2;
+
 async function migrate(store) {
-  const sql = schema(store.kind);
+  const base = schema(store.kind);
+  const stmts = (sql) =>
+    sql
+      .split(';')
+      .map((x) => x.trim())
+      .filter(Boolean);
+  const steps = async (q) => {
+    // Version 1 is the original schema (idempotent, so existing databases
+    // without a version table are simply treated as version 1).
+    for (const st of stmts(base)) await q(st);
+    await q('CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL)');
+    const cur = await q('SELECT max(v) AS v FROM schema_version');
+    let v = Number(cur.rows[0]?.v) || 1;
+    for (const m of migrations(store.kind)) {
+      if (m.v <= v) continue;
+      for (const st of stmts(m.sql)) await q(st);
+      await q(`INSERT INTO schema_version(v) VALUES (${m.v})`);
+      v = m.v;
+    }
+    return v;
+  };
   if (store.kind === 'pg') {
     // Concurrent replicas booting at once: serialise DDL with an advisory lock.
-    await store.tx(async (t) => {
+    return store.tx(async (t) => {
       await t.query('SELECT pg_advisory_xact_lock(424242)');
-      for (const stmt of sql.split(';').map((s) => s.trim()).filter(Boolean)) await t.query(stmt);
+      return steps((sql) => t.query(sql));
     });
-  } else {
-    await store.exec(sql);
   }
+  return store.tx((t) => steps((sql) => t.query(sql)));
 }

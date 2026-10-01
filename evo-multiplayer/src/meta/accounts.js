@@ -57,28 +57,41 @@ export function publicAccount(a) {
 }
 
 export class Accounts {
-  constructor(store, { log = () => {} } = {}) {
+  // registerPerHour: accounts one IP may create per hour (all replicas
+  // share the count: it lives in the database, like the login throttle and
+  // the TOTP replay guard).
+  constructor(store, { log = () => {}, registerPerHour = 5, pepper = '' } = {}) {
     this.store = store;
     this.log = log;
-    this.fails = new Map(); // "u:name" / "i:ip" -> { n, t }
-    this.usedTotp = new Map(); // account -> last used step
+    this.registerPerHour = registerPerHour;
+    this.pepper = pepper;
   }
 
-  throttled(keys) {
+  ipKey(ip) {
+    return ip ? sha(`${this.pepper}:${ip}`).slice(0, 22) : '';
+  }
+
+  // Failed logins per "u:name" / "i:<ip hash>": 10 within 10 minutes locks
+  // that key for the rest of the window.
+  async throttled(keys) {
+    const r = await this.store.query(`SELECT n, t FROM throttle WHERE key IN (${keys.map((_, i) => `$${i + 1}`).join(', ')})`, keys);
     const now = Date.now();
-    return keys.some((k) => {
-      const f = this.fails.get(k);
-      return f && f.n >= 10 && now - f.t < 10 * 60000;
-    });
+    return r.rows.some((f) => Number(f.n) >= 10 && now - Number(f.t) < 10 * 60000);
   }
 
-  noteFail(keys) {
+  async noteFail(keys) {
     const now = Date.now();
     for (const k of keys) {
-      const f = this.fails.get(k);
-      this.fails.set(k, { n: f && now - f.t < 10 * 60000 ? f.n + 1 : 1, t: now });
+      await this.store.query(
+        `INSERT INTO throttle(key, n, t) VALUES ($1, 1, $2)
+         ON CONFLICT (key) DO UPDATE SET n = CASE WHEN throttle.t > $3 THEN throttle.n + 1 ELSE 1 END, t = $2`,
+        [k, now, now - 10 * 60000],
+      );
     }
-    if (this.fails.size > 100000) this.fails.clear();
+  }
+
+  throttleKeys(name, ip) {
+    return [`u:${String(name ?? '').toLowerCase()}`, `i:${this.ipKey(ip)}`];
   }
 
   async newSession(t, accountId, ua) {
@@ -94,15 +107,20 @@ export class Accounts {
     return token;
   }
 
-  async register({ name, password, hue = Math.random(), ua = '' }) {
+  async register({ name, password, hue = Math.random(), ua = '', ip = '' }) {
     if (!validName(name)) throw new AppError('BAD_NAME', '名字需为 2–20 个字母、数字、汉字或下划线');
     if (!validPassword(password)) throw new AppError('BAD_PASSWORD', '密码至少 8 位');
+    const regIp = this.ipKey(ip);
+    if (regIp && this.registerPerHour > 0) {
+      const r = await this.store.query('SELECT count(*) AS n FROM accounts WHERE reg_ip = $1 AND created > $2', [regIp, Date.now() - 3600000]);
+      if (Number(r.rows[0].n) >= this.registerPerHour) throw new AppError('RATE', '这个网络注册太频繁，请稍后再试');
+    }
     const pass = await hashPassword(password);
     const codes = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString('hex'));
     return this.store.tx(async (t) => {
       const r = await t.query(
-        'INSERT INTO accounts(name_lc, display, pass, hue, recovery, created) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (name_lc) DO NOTHING RETURNING *',
-        [name.toLowerCase(), name, pass, Number(hue) || 0, JSON.stringify(codes.map(sha)), Date.now()],
+        'INSERT INTO accounts(name_lc, display, pass, hue, recovery, created, reg_ip) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (name_lc) DO NOTHING RETURNING *',
+        [name.toLowerCase(), name, pass, Number(hue) || 0, JSON.stringify(codes.map(sha)), Date.now(), regIp],
       );
       if (r.rows.length === 0) throw new AppError('NAME_TAKEN', '这个名字已被注册');
       const acct = r.rows[0];
@@ -113,21 +131,21 @@ export class Accounts {
   }
 
   async login({ name, password, totp, ua = '', ip = '' }) {
-    const keys = [`u:${String(name).toLowerCase()}`, `i:${ip}`];
-    if (this.throttled(keys)) throw new AppError('THROTTLED', '尝试次数过多，请 10 分钟后再试');
+    const keys = this.throttleKeys(name, ip);
+    if (await this.throttled(keys)) throw new AppError('THROTTLED', '尝试次数过多，请 10 分钟后再试');
     const r = await this.store.query('SELECT * FROM accounts WHERE name_lc = $1', [String(name ?? '').toLowerCase()]);
     const acct = r.rows[0];
     // Run scrypt even for unknown names so timing does not reveal which exist.
     const ok = await checkPassword(String(password ?? ''), acct ? acct.pass : 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAA');
     if (!acct || !ok) {
-      this.noteFail(keys);
+      await this.noteFail(keys);
       throw new AppError('BAD_LOGIN', '用户名或密码错误');
     }
     if (Number(acct.banned_until) > Date.now()) throw new AppError('BANNED', '账号已被封禁');
     if (Number(acct.totp_enabled)) {
       if (!totp) throw new AppError('TOTP_REQUIRED', '请输入两步验证码');
-      if (!this.checkTotp(acct, totp)) {
-        this.noteFail(keys);
+      if (!(await this.checkTotp(acct, totp))) {
+        await this.noteFail(keys);
         throw new AppError('BAD_TOTP', '验证码错误');
       }
     }
@@ -135,13 +153,13 @@ export class Accounts {
     return { account: publicAccount(acct), token };
   }
 
-  checkTotp(acct, code) {
+  // A code is accepted once: the used time step is recorded with a
+  // conditional update, so a replay fails on every replica.
+  async checkTotp(acct, code) {
     const step = verifyTotp(acct.totp_secret, code);
     if (step < 0) return false;
-    const id = Number(acct.id);
-    if ((this.usedTotp.get(id) ?? -1) >= step) return false; // replay
-    this.usedTotp.set(id, step);
-    return true;
+    const r = await this.store.query('UPDATE accounts SET totp_last = $1 WHERE id = $2 AND totp_last < $1', [step, Number(acct.id)]);
+    return r.count === 1;
   }
 
   // Session token -> account (or null). Touches last_seen at most once a minute.
@@ -194,45 +212,47 @@ export class Accounts {
 
   // Reset with a one-time recovery code; revokes every session.
   async recover({ name, code, newPassword, ua = '', ip = '' }) {
-    const keys = [`u:${String(name).toLowerCase()}`, `i:${ip}`];
-    if (this.throttled(keys)) throw new AppError('THROTTLED', '尝试次数过多，请 10 分钟后再试');
+    const keys = this.throttleKeys(name, ip);
+    if (await this.throttled(keys)) throw new AppError('THROTTLED', '尝试次数过多，请 10 分钟后再试');
     if (!validPassword(newPassword)) throw new AppError('BAD_PASSWORD', '密码至少 8 位');
     const pass = await hashPassword(newPassword);
+    // The failure is recorded after the transaction (SQLite has one
+    // connection: a write inside the transaction's callback would wait on it).
     return this.store.tx(async (t) => {
       const r = await t.query(`SELECT * FROM accounts WHERE name_lc = $1${this.store.forUpdate}`, [String(name ?? '').toLowerCase()]);
       const acct = r.rows[0];
       const codes = acct ? JSON.parse(acct.recovery) : [];
       const i = codes.indexOf(sha(String(code ?? '').trim()));
-      if (!acct || i < 0) {
-        this.noteFail(keys);
-        throw new AppError('BAD_RECOVERY', '恢复码无效');
-      }
+      if (!acct || i < 0) throw new AppError('BAD_RECOVERY', '恢复码无效');
       codes.splice(i, 1);
       await t.query('UPDATE accounts SET pass = $1, recovery = $2, totp_enabled = 0 WHERE id = $3', [pass, JSON.stringify(codes), acct.id]);
       await t.query('DELETE FROM sessions WHERE account = $1', [acct.id]);
       const token = await this.newSession(t, acct.id, ua);
       return { account: publicAccount({ ...acct, totp_enabled: 0 }), token, codesLeft: codes.length };
+    }).catch(async (err) => {
+      if (err.code === 'BAD_RECOVERY') await this.noteFail(keys);
+      throw err;
     });
   }
 
   async totpSetup(accountId) {
     const secret = newSecret();
     const a = await this.store.query('SELECT display FROM accounts WHERE id = $1', [accountId]);
-    await this.store.query('UPDATE accounts SET totp_secret = $1, totp_enabled = 0 WHERE id = $2', [secret, accountId]);
+    await this.store.query('UPDATE accounts SET totp_secret = $1, totp_enabled = 0, totp_last = -1 WHERE id = $2', [secret, accountId]);
     return { secret, uri: otpauthUri(secret, a.rows[0]?.display ?? String(accountId)) };
   }
 
   async totpEnable(accountId, code) {
     const r = await this.store.query('SELECT * FROM accounts WHERE id = $1', [accountId]);
     const acct = r.rows[0];
-    if (!acct?.totp_secret || !this.checkTotp(acct, code)) throw new AppError('BAD_TOTP', '验证码错误');
+    if (!acct?.totp_secret || !(await this.checkTotp(acct, code))) throw new AppError('BAD_TOTP', '验证码错误');
     await this.store.query('UPDATE accounts SET totp_enabled = 1 WHERE id = $1', [accountId]);
   }
 
   async totpDisable(accountId, code) {
     const r = await this.store.query('SELECT * FROM accounts WHERE id = $1', [accountId]);
     const acct = r.rows[0];
-    if (!Number(acct?.totp_enabled) || !this.checkTotp(acct, code)) throw new AppError('BAD_TOTP', '验证码错误');
+    if (!Number(acct?.totp_enabled) || !(await this.checkTotp(acct, code))) throw new AppError('BAD_TOTP', '验证码错误');
     await this.store.query('UPDATE accounts SET totp_enabled = 0, totp_secret = NULL WHERE id = $1', [accountId]);
   }
 
