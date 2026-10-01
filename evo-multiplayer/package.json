@@ -17,6 +17,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "pg": "^8.23.1",
     "ws": "^8.21.3"
   }
 }

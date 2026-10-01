@@ -1,0 +1,169 @@
+// Economy invariants under concurrency, on SQLite and (if available)
+// PostgreSQL. Set TEST_DATABASE_URL=postgres://... to include Postgres.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { openStore } from '../src/meta/store.js';
+import { Accounts, STARTER_GRANT } from '../src/meta/accounts.js';
+import { Economy, MARKET_FEE, RELEASE_FEE } from '../src/meta/economy.js';
+import { mint, move } from '../src/meta/ledger.js';
+import { hotp, totp, verifyTotp, base32Encode } from '../src/meta/totp.js';
+
+const urls = ['sqlite::memory:'];
+if (process.env.TEST_DATABASE_URL) urls.push(process.env.TEST_DATABASE_URL);
+
+async function freshPg(url) {
+  // Isolate each run in its own schema-free database state.
+  const s = await openStore(url);
+  await s.exec('TRUNCATE accounts, sessions, balances, ledger, items, item_log, listings, trades, friends, blocks, messages, reports, audit RESTART IDENTITY');
+  return s;
+}
+
+async function invariants(store) {
+  const bal = await store.query('SELECT account, amount FROM balances');
+  let sum = 0;
+  for (const r of bal.rows) {
+    const a = Number(r.account);
+    const amt = Number(r.amount);
+    sum += amt;
+    if (a > 0) assert.ok(amt >= 0, `negative balance ${a}: ${amt}`);
+    const flow = await store.query(
+      'SELECT coalesce((SELECT sum(amount) FROM ledger WHERE to_acct = $1), 0) - coalesce((SELECT sum(amount) FROM ledger WHERE from_acct = $1), 0) AS f',
+      [a],
+    );
+    assert.equal(Number(flow.rows[0].f), amt, `balance of ${a} != ledger flow`);
+  }
+  assert.equal(sum, 0, 'currency created or destroyed outside MINT/SINK');
+  const dupLock = await store.query("SELECT lock, count(*) AS n FROM items WHERE lock IS NOT NULL GROUP BY lock HAVING count(*) > 1");
+  assert.equal(dupLock.rows.length, 0, 'an escrow holds two items');
+  const sold = await store.query("SELECT item, count(*) AS n FROM listings WHERE status = 'sold' GROUP BY item, buyer HAVING count(*) > 1");
+  assert.equal(sold.rows.length, 0);
+  // Every open listing's item is locked by exactly that listing.
+  const open = await store.query("SELECT l.id, i.lock, i.owner, l.seller FROM listings l JOIN items i ON i.id = l.item WHERE l.status = 'open'");
+  for (const r of open.rows) {
+    assert.equal(r.lock, `L:${r.id}`);
+    assert.equal(Number(r.owner), Number(r.seller));
+  }
+}
+
+test('TOTP matches RFC 6238 test vectors', () => {
+  const secret = base32Encode(Buffer.from('12345678901234567890'));
+  assert.equal(hotp(secret, 1), '287082'); // T=59s
+  assert.equal(totp(secret, 1111111109 * 1000), '081804');
+  assert.equal(verifyTotp(secret, totp(secret)) >= 0, true);
+  assert.equal(verifyTotp(secret, '000000', 0) >= 0 && totp(secret, 0) !== '000000', false);
+});
+
+for (const url of urls) {
+  const kind = url.split(':')[0];
+
+  test(`[${kind}] accounts: register, login, sessions, recovery, throttling`, async () => {
+    const store = url.startsWith('postgres') ? await freshPg(url) : await openStore(url);
+    const acc = new Accounts(store);
+    const reg = await acc.register({ name: '阿星', password: 'correct horse' });
+    assert.equal(reg.account.name, '阿星');
+    assert.equal(reg.recoveryCodes.length, 8);
+    await assert.rejects(acc.register({ name: '阿星', password: 'whatever12' }), { code: 'NAME_TAKEN' });
+    await assert.rejects(acc.register({ name: 'x', password: 'whatever12' }), { code: 'BAD_NAME' });
+    assert.equal((await acc.resume(reg.token)).id, reg.account.id);
+    await assert.rejects(acc.login({ name: '阿星', password: 'wrong', ip: '1' }), { code: 'BAD_LOGIN' });
+    const lg = await acc.login({ name: '阿星', password: 'correct horse', ip: '1' });
+    assert.ok(lg.token);
+    // Session tokens are stored hashed.
+    const raw = await store.query('SELECT token_hash FROM sessions');
+    assert.ok(raw.rows.every((r) => !r.token_hash.startsWith('S')));
+    // Recovery code resets the password and revokes old sessions.
+    const rec = await acc.recover({ name: '阿星', code: reg.recoveryCodes[0], newPassword: 'new password!' });
+    assert.equal(await acc.resume(reg.token), null);
+    assert.ok(await acc.resume(rec.token));
+    await assert.rejects(acc.recover({ name: '阿星', code: reg.recoveryCodes[0], newPassword: 'again again' }), { code: 'BAD_RECOVERY' });
+    // Throttle after 10 failures.
+    for (let i = 0; i < 10; i++) await acc.login({ name: 'nobody', password: 'x', ip: '9' }).catch(() => {});
+    await assert.rejects(acc.login({ name: '阿星', password: 'new password!', ip: '9' }), { code: 'THROTTLED' });
+    // TOTP
+    const id = reg.account.id;
+    const { secret } = await acc.totpSetup(id);
+    await acc.totpEnable(id, totp(secret));
+    await assert.rejects(acc.login({ name: '阿星', password: 'new password!', ip: '2' }), { code: 'TOTP_REQUIRED' });
+    await assert.rejects(acc.login({ name: '阿星', password: 'new password!', ip: '2', totp: totp(secret) }), { code: 'BAD_TOTP' }, 'replayed code accepted');
+    await store.close();
+  });
+
+  test(`[${kind}] economy invariants hold under concurrent market, trade and transfer storms`, async () => {
+    const store = url.startsWith('postgres') ? await freshPg(url) : await openStore(url);
+    const acc = new Accounts(store);
+    const eco = new Economy(store);
+    const N = 12;
+    const ids = [];
+    for (let i = 0; i < N; i++) ids.push((await acc.register({ name: `p${i}_${kind}`, password: 'password123' })).account.id);
+    for (const id of ids) assert.equal(await eco.balance(id), STARTER_GRANT);
+    // Each player captures 4 specimens.
+    const items = new Map();
+    for (const id of ids) {
+      items.set(id, []);
+      for (let k = 0; k < 4; k++) items.get(id).push((await eco.captured(id, `cap:test:${id}:${k}`, { genome: 'x', hue: 0.5 })).item);
+    }
+    // Capturing the same organism twice yields the same item, not a new one.
+    const again = await eco.captured(ids[0], `cap:test:${ids[0]}:0`, { genome: 'x' });
+    assert.equal(again.created, false);
+
+    // Everyone lists 2 items.
+    const listings = [];
+    for (const id of ids) for (const it of items.get(id).slice(0, 2)) listings.push((await eco.list(id, it, 5 + Math.floor(Math.random() * 30))).listing);
+
+    // Storm: concurrent buys (several buyers race for each listing), trades,
+    // cancels, direct transfers, rewards replayed with the same key.
+    const rnd = (a) => a[Math.floor(Math.random() * a.length)];
+    const ops = [];
+    for (const l of listings) for (let k = 0; k < 3; k++) ops.push(() => eco.buy(rnd(ids), l));
+    for (let k = 0; k < 40; k++) {
+      ops.push(async () => {
+        const a = rnd(ids);
+        const b = rnd(ids.filter((x) => x !== a));
+        const tr = await eco.openTrade(a, b, async () => false);
+        const s1 = await eco.setOffer(a, tr.id, { items: items.get(a).slice(2, 3), coins: Math.floor(Math.random() * 20) });
+        const s2 = await eco.setOffer(b, tr.id, { items: items.get(b).slice(3, 4), coins: Math.floor(Math.random() * 20) });
+        await eco.confirm(a, tr.id, s2.version);
+        await eco.confirm(b, tr.id, s2.version);
+        void s1;
+      });
+    }
+    for (let k = 0; k < 60; k++) {
+      ops.push(() => store.tx((t) => move(t, { key: `gift:${k}`, kind: 'gift', from: rnd(ids), to: rnd(ids), amount: 1 + Math.floor(Math.random() * 40) })));
+      ops.push(() => store.tx((t) => mint(t, rnd(ids), 3, `reward:${k % 10}`, 'reward'))); // keys repeat: must apply once
+    }
+    for (const l of listings.slice(0, 6)) ops.push(() => eco.cancelListing(rnd(ids), l));
+    ops.sort(() => Math.random() - 0.5);
+    const results = await Promise.allSettled(ops.map((f) => f()));
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    assert.ok(ok > 50, `too few operations succeeded (${ok})`);
+    for (const r of results) {
+      if (r.status === 'rejected' && !r.reason.code) throw r.reason; // only expected business errors
+    }
+
+    // Each listing sold at most once; each sale paid the fee.
+    const sales = await store.query("SELECT id, price FROM listings WHERE status = 'sold'");
+    for (const s of sales.rows) {
+      const fee = await store.query('SELECT amount FROM ledger WHERE key = $1', [`buy:${s.id}:fee`]);
+      assert.equal(Number(fee.rows[0].amount), Math.max(1, Math.ceil(Number(s.price) * MARKET_FEE)));
+    }
+    // Reward keys applied exactly once each.
+    const rw = await store.query("SELECT count(*) AS n FROM ledger WHERE key LIKE 'reward:%'");
+    assert.equal(Number(rw.rows[0].n), 10);
+    await invariants(store);
+
+    // Release: consumes item + fee once.
+    const someone = ids.find(async () => true);
+    const mine = await eco.items(someone);
+    const free = mine.find((x) => !x.lock);
+    if (free && (await eco.balance(someone)) >= RELEASE_FEE) {
+      const r = await eco.release(someone, free.id);
+      assert.equal(r.spawnKey, `rel:${free.id}`);
+      await assert.rejects(eco.release(someone, free.id), { code: 'ITEM_UNAVAILABLE' });
+    }
+    await invariants(store);
+    const st = await eco.stats();
+    assert.equal(st.balanceSum, 0);
+    await store.close();
+  });
+}
