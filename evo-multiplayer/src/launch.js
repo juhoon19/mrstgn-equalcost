@@ -80,12 +80,40 @@ function startShard(i) {
 const children = [];
 for (let i = 0; i < shards; i++) children.push(startShard(i));
 
+// --zones CxR: one extra gateway process per zone on port+1+z, and the
+// shared-port gateways become the lobby that hands players to their zone.
+// (Single-machine testing; in production each zone is a pool behind its own
+// URL - see scripts/gen-cluster.mjs.)
+const zonesArg = arg('zones', 'ZONES_GRID', '');
+let zoneEnv = {};
+const zoneChildren = [];
+if (zonesArg) {
+  const [cols, rows] = zonesArg.split('x').map(Number);
+  const zoneHost = arg('zone-host', 'ZONE_HOST', 'localhost');
+  const urls = Array.from({ length: cols * rows }, (_, z) => `ws://${zoneHost}:${port + 1 + z}/ws`);
+  zoneEnv = { ZONES: JSON.stringify({ cols, rows, urls }) };
+  const startZone = (z) => {
+    const child = fork(path.join(HERE, 'server/gateway-node.js'), [], {
+      env: { ...env, ...zoneEnv, ZONE: String(z), PORT: String(port + 1 + z), HOST: arg('host', 'HOST', '0.0.0.0') },
+    });
+    child.on('exit', (code) => {
+      if (stopping) return;
+      console.error(`[launch] zone gateway ${z} exited (${code}); restarting`);
+      setTimeout(() => (zoneChildren[z] = startZone(z)), 1000);
+    });
+    return child;
+  };
+  for (let z = 0; z < cols * rows; z++) zoneChildren.push(startZone(z));
+  console.log(`[launch] zones ${cols}x${rows}: gateways on ports ${port + 1}..${port + cols * rows}`);
+}
+
 cluster.setupPrimary({ exec: path.join(HERE, 'server/gateway-node.js') });
-for (let i = 0; i < gateways; i++) cluster.fork({ ...env, PORT: String(port), HOST: arg('host', 'HOST', '0.0.0.0') });
+const lobbyEnv = { ...env, ...zoneEnv, ZONE: '-1', PORT: String(port), HOST: arg('host', 'HOST', '0.0.0.0') };
+for (let i = 0; i < gateways; i++) cluster.fork(lobbyEnv);
 cluster.on('exit', (worker, code) => {
   if (stopping) return;
   console.error(`[launch] gateway ${worker.process.pid} exited (${code}); restarting`);
-  cluster.fork({ ...env, PORT: String(port), HOST: arg('host', 'HOST', '0.0.0.0') });
+  cluster.fork(lobbyEnv);
 });
 
 console.log(`[launch] ${shards} shard(s), ${gateways} gateway(s), world ${chunksX}x${chunksY} chunks`);
@@ -94,6 +122,7 @@ console.log(`[launch] open http://localhost:${port}  (public: see docs/deploy.md
 function shutdown() {
   stopping = true;
   for (const c of children) c.kill('SIGTERM'); // shards save a snapshot first
+  for (const c of zoneChildren) c.kill();
   for (const w of Object.values(cluster.workers)) w.kill();
   setTimeout(() => process.exit(0), 1500);
 }

@@ -59,6 +59,8 @@ const totals = {
   rtts: [],
   summaries: 0,
   stats: null,
+  handovers: 0,
+  identityLost: 0,
 };
 const worlds = [];
 const byType = {};
@@ -68,19 +70,77 @@ class Bot {
     this.i = i;
     this.decode = Math.random() < decodeFrac;
     this.tier = Math.random() < loFrac ? 1 : 0; // fraction of zoomed-out watchers
-    this.ws = new WebSocket(url, { perMessageDeflate: false });
-    this.ws.binaryType = 'nodebuffer';
-    this.ws.on('open', () => {
-      totals.connected++;
-      this.ws.send(JSON.stringify({ t: 'hello', name: `bot${i}`, hue: Math.random() }));
-    });
-    this.ws.on('message', (data, isBinary) => this.onMessage(data, isBinary));
-    this.ws.on('close', () => {
-      totals.closed++;
-      this.stop();
-    });
-    this.ws.on('error', () => totals.errors++);
+    this.hue = Math.random();
     this.timers = [];
+    this.next = null; // zone handover in progress
+    this.ws = this.open(url);
+  }
+
+  open(target) {
+    const ws = new WebSocket(target, { perMessageDeflate: false });
+    ws.binaryType = 'nodebuffer';
+    ws.on('open', () => {
+      totals.connected++;
+      ws.send(JSON.stringify({ t: 'hello', name: `bot${this.i}`, hue: this.hue, token: this.welcome?.token }));
+    });
+    ws.on('message', (data, isBinary) => {
+      if (ws === this.ws) this.onMessage(data, isBinary);
+      else if (this.next && ws === this.next.ws) this.onNextMessage(data, isBinary);
+    });
+    ws.on('close', () => {
+      if (ws === this.ws) {
+        totals.closed++;
+        this.stop();
+      } else if (this.next && ws === this.next.ws) this.next = null;
+    });
+    ws.on('error', () => totals.errors++);
+    return ws;
+  }
+
+  // Zone handover (same as the browser client): connect to the zone the
+  // camera is in, fill a fresh replica there, then swap and close the old.
+  checkZone() {
+    const w = this.welcome;
+    if (!w || !w.zones || this.next) return;
+    const cx = this.x + viewW / 2;
+    const cy = this.y + viewH / 2;
+    const want = w.zone < 0 ? this.topo.zoneAt(w.zones, cx, cy) : this.topo.zoneAtStable(w.zones, cx, cy, w.world.chunkSize / 2);
+    if (want < 0 || want === w.zone) return;
+    this.next = { ws: this.open(w.zones.urls[want]), welcome: null, world: null };
+  }
+
+  onNextMessage(data, isBinary) {
+    const n = this.next;
+    totals.bytes += data.length;
+    if (!isBinary) {
+      const msg = JSON.parse(data.toString());
+      if (msg.t !== 'welcome') return;
+      n.welcome = msg;
+      if (this.decode) n.world = new ClientWorld(msg.world, msg.posQuant);
+      n.ws.send(encodeView(this.x, this.y, this.x + viewW, this.y + viewH, this.tier));
+      setTimeout(() => this.finishZone(n), 600);
+      return;
+    }
+    if (!n.world) return;
+    const now = performance.now();
+    unpackBatch(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), (m) => {
+      if (m[0] === S_CHUNK) n.world.applyChunk(m, now);
+    });
+  }
+
+  finishZone(n) {
+    if (this.next !== n) return;
+    const old = this.ws;
+    this.next = null;
+    this.ws = n.ws;
+    if (n.welcome.pid !== this.welcome.pid) totals.identityLost++;
+    this.welcome = n.welcome;
+    if (n.world) {
+      this.world = n.world;
+      worlds.push(n.world);
+    }
+    totals.handovers++;
+    old.close(1000, 'zone handover');
   }
 
   onMessage(data, isBinary) {
@@ -124,6 +184,10 @@ class Bot {
 
   onWelcome(msg) {
     totals.welcomed++;
+    if (this.welcome) {
+      this.welcome = msg; // reconnect: keep camera and timers
+      return;
+    }
     this.welcome = msg;
     this.topo = new Topology(msg.world, 1);
     if (this.decode) {
@@ -169,6 +233,7 @@ class Bot {
 
   sendView() {
     this.send(encodeView(this.x, this.y, this.x + viewW, this.y + viewH, this.tier));
+    this.checkZone();
   }
 
   send(buf) {
@@ -217,7 +282,7 @@ const report = setInterval(() => {
         `rtt p50=${p(0.5)}ms p95=${p(0.95)}ms p99=${p(0.99)}ms ` +
         `decoded=${worlds.length} ents/decoder=${(err.entities / Math.max(1, worlds.length)).toFixed(0)} ` +
         `gaps=${err.gaps} unknownIds=${err.unknownIds} dupAdds=${err.dupAdds} ` +
-        `cursorsSeen=${totals.cursorsSeen} chats=${totals.chats}` +
+        `cursorsSeen=${totals.cursorsSeen} chats=${totals.chats} handovers=${totals.handovers}` +
         (s ? ` | server: online=${s.online} cells=${s.cells} tidi=${s.tidi}` : ''),
     );
   }
@@ -237,6 +302,8 @@ setTimeout(() => {
     welcomed: totals.welcomed,
     errors: totals.errors,
     bytesPerBotPerSec: Math.round(totals.bytes / Math.max(1, totals.welcomed) / duration),
+    handovers: totals.handovers,
+    identityLost: totals.identityLost,
     ...err,
   };
   const tot = Object.values(byType).reduce((a, b) => a + b, 0);

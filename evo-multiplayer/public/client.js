@@ -110,39 +110,124 @@ function wsUrl() {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 }
 
-function connect() {
+function helloMessage() {
+  return JSON.stringify({
+    t: 'hello',
+    name: store.get('name', ''),
+    hue: Number(store.get('hue', 0)) / 360,
+    token: store.get('token', ''),
+  });
+}
+
+function connect(url = currentZoneUrl() || wsUrl()) {
   setStatus('连接中…');
-  ws = new WebSocket(wsUrl());
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => {
-    ws.send(
-      JSON.stringify({
-        t: 'hello',
-        name: store.get('name', ''),
-        hue: Number(store.get('hue', 0)) / 360,
-        token: store.get('token', ''),
-      }),
-    );
-  };
-  ws.onmessage = (ev) => onMessage(ev.data);
-  ws.onclose = (ev) => {
-    connected = false;
-    if (ev.code === 4003) {
-      setStatus('已被封禁');
-      addChatLine('系统', '你已被管理员封禁，无法进入。');
-      return; // don't hammer the server
-    }
-    if (ev.code === 4001) {
-      setStatus('已被踢出');
-      addChatLine('系统', '你被管理员踢出，10 秒后自动重连。');
-      setTimeout(connect, 10000);
+  const sock = new WebSocket(url);
+  ws = sock;
+  sock.binaryType = 'arraybuffer';
+  sock.onopen = () => sock.send(helloMessage());
+  sock.onmessage = (ev) => onMessage(ev.data);
+  sock.onclose = (ev) => onActiveClose(sock, ev);
+  sock.onerror = () => {};
+}
+
+function onActiveClose(sock, ev) {
+  if (sock !== ws) return; // an old connection retired by a zone handover
+  connected = false;
+  if (ev.code === 4003) {
+    setStatus('已被封禁');
+    addChatLine('系统', '你已被管理员封禁，无法进入。');
+    return; // don't hammer the server
+  }
+  if (ev.code === 4001) {
+    setStatus('已被踢出');
+    addChatLine('系统', '你被管理员踢出，10 秒后自动重连。');
+    setTimeout(() => connect(), 10000);
+    return;
+  }
+  setStatus('已断开，重连中…');
+  setTimeout(() => connect(), reconnectDelay);
+  reconnectDelay = Math.min(8000, reconnectDelay * 2);
+}
+
+// ---------------------------------------------------------- zone handover
+// With zones, each region of the world is served by its own gateway pool.
+// When the camera settles inside another zone, open a connection there,
+// let it fill a fresh replica in the background, then swap and close the
+// old one: make-before-break, so the picture never goes empty.
+let zoneSwitch = null;
+let zoneRetryAt = 0;
+
+function zoneUrlFor(z) {
+  const u = welcome.zones.urls[z];
+  if (/^wss?:\/\//.test(u)) return u;
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${u.startsWith('/') ? '' : '/'}${u}`;
+}
+
+function currentZoneUrl() {
+  return welcome && welcome.zones && welcome.zone >= 0 ? zoneUrlFor(welcome.zone) : null;
+}
+
+function checkZone(now) {
+  if (!welcome || !welcome.zones || zoneSwitch || now < zoneRetryAt || !connected) return;
+  // From the lobby (zone -1) go straight to the right zone; between zones
+  // require the camera to be half a chunk inside the new one (hysteresis).
+  const want =
+    welcome.zone < 0
+      ? topo.zoneAt(welcome.zones, cam.x, cam.y)
+      : topo.zoneAtStable(welcome.zones, cam.x, cam.y, welcome.world.chunkSize / 2);
+  if (want < 0 || want === welcome.zone) return;
+  const sock = new WebSocket(zoneUrlFor(want));
+  sock.binaryType = 'arraybuffer';
+  const sw = { ws: sock, zone: want, welcome: null, world: null, t: 0 };
+  zoneSwitch = sw;
+  sock.onopen = () => sock.send(helloMessage());
+  sock.onmessage = (ev) => {
+    if (zoneSwitch !== sw) return;
+    if (typeof ev.data === 'string') {
+      const m = JSON.parse(ev.data);
+      if (m.t === 'welcome') {
+        sw.welcome = m;
+        sw.world = new ClientWorld(m.world, m.posQuant);
+        sw.t = performance.now();
+        const [x0, y0, x1, y1] = viewRect();
+        sock.send(encodeView(x0, y0, x1, y1, viewTier()));
+      }
       return;
     }
-    setStatus('已断开，重连中…');
-    setTimeout(connect, reconnectDelay);
-    reconnectDelay = Math.min(8000, reconnectDelay * 2);
+    if (!sw.world) return;
+    const t = performance.now();
+    unpackBatch(new Uint8Array(ev.data), (b) => {
+      if (b[0] === S_CHUNK) sw.world.applyChunk(b, t);
+      else if (b[0] === S_FIELD) sw.world.applyField(b, t);
+    });
+    const [x0, y0, x1, y1] = viewRect();
+    const want = topo.viewChunks(x0, y0, x1, y1, sw.welcome.viewMargin, viewMaxChunks()) || [];
+    let have = 0;
+    for (const id of want) if (sw.world.chunks.has(id)) have++;
+    if (have >= want.length * 0.9 || t - sw.t > 1500) finishZoneSwitch(sw);
   };
-  ws.onerror = () => {};
+  sock.onclose = (ev) => {
+    if (zoneSwitch !== sw) return;
+    zoneSwitch = null;
+    zoneRetryAt = performance.now() + (ev.code === 4003 ? 1e9 : 3000);
+  };
+  sock.onerror = () => {};
+}
+
+function finishZoneSwitch(sw) {
+  const old = ws;
+  zoneSwitch = null;
+  ws = sw.ws;
+  world = sw.world;
+  welcome = sw.welcome;
+  store.set('token', welcome.token);
+  ws.onmessage = (ev) => onMessage(ev.data);
+  ws.onclose = (ev) => onActiveClose(sw.ws, ev);
+  fieldImages.clear();
+  cursors.clear();
+  viewDirty = true;
+  old.close(1000, 'zone handover');
+  setStatus(`在线 · ${welcome.zone + 1} 区`);
 }
 
 function send(buf) {
@@ -214,7 +299,7 @@ function onWelcome(msg) {
   }
   clampCam();
   viewDirty = true;
-  setStatus('在线');
+  setStatus(msg.zones && msg.zone >= 0 ? `在线 · ${msg.zone + 1} 区` : '在线');
 }
 
 function onStats(msg) {
@@ -319,6 +404,7 @@ function maybeSendView(now) {
   lastViewSent = now;
   const [x0, y0, x1, y1] = viewRect();
   send(encodeView(x0, y0, x1, y1, viewTier()));
+  checkZone(now);
   // Mirror the gateway's interest set and forget chunks that left it.
   const want = new Set(topo.viewChunks(x0, y0, x1, y1, welcome.viewMargin, viewMaxChunks()) || []);
   for (const id of [...world.chunks.keys()]) if (!want.has(id)) world.dropChunk(id);

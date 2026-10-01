@@ -171,6 +171,35 @@ export class Topology {
     return this.chunksInRect(ax, ay, bx, by);
   }
 
+  // Zones: the world split into zones.cols x zones.rows rectangles (on chunk
+  // boundaries), each served by its own gateway pool, so a gateway only
+  // ingests the part of the world its players look at.
+  zoneOfChunk(zones, chunkId) {
+    const [cx, cy] = this.chunkXY(chunkId);
+    const zx = Math.floor((cx * zones.cols) / this.world.chunksX);
+    const zy = Math.floor((cy * zones.rows) / this.world.chunksY);
+    return zy * zones.cols + zx;
+  }
+
+  zoneAt(zones, x, y) {
+    return this.zoneOfChunk(zones, this.chunkAt(x, y));
+  }
+
+  // Zone containing (x, y) only if the point is at least `margin` inside it
+  // (hysteresis for handovers); otherwise -1.
+  zoneAtStable(zones, x, y, margin) {
+    const z = this.zoneAt(zones, x, y);
+    for (const [dx, dy] of [
+      [margin, 0],
+      [-margin, 0],
+      [0, margin],
+      [0, -margin],
+    ]) {
+      if (this.zoneAt(zones, x + dx, y + dy) !== z) return -1;
+    }
+    return z;
+  }
+
   // Number of chunks a rectangle would cover (without building the list).
   rectChunkCount(x0, y0, x1, y1) {
     const s = this.world.chunkSize;

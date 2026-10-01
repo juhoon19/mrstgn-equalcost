@@ -79,6 +79,14 @@ export async function startGateway(opts = {}) {
   const secret = opts.secret ?? cfg.secret;
   const tokenSecret = opts.tokenSecret ?? cfg.get('token-secret', 'TOKEN_SECRET', secret + ':tokens');
   const maxChunks = Number(opts.maxChunks ?? cfg.get('max-chunks', 'MAX_CHUNKS', 30));
+  // ZONES: {"cols":2,"rows":2,"urls":["/z/0/ws",...]} (relative or absolute);
+  // ZONE: which zone this gateway serves (-1 = lobby/any: hand everyone off).
+  const zonesJson = opts.zones ?? cfg.get('zones', 'ZONES', '');
+  const zones = typeof zonesJson === 'string' ? (zonesJson ? JSON.parse(zonesJson) : null) : zonesJson;
+  const myZone = Number(opts.zone ?? cfg.get('zone', 'ZONE', -1));
+  if (zones && (!Array.isArray(zones.urls) || zones.urls.length !== zones.cols * zones.rows)) {
+    throw new Error('ZONES needs cols, rows and one url per zone');
+  }
   const summaryMax = Number(opts.summaryMax ?? cfg.get('summary-max', 'SUMMARY_MAX', 48));
   const maxChunksLo = Number(opts.maxChunksLo ?? cfg.get('max-chunks-lo', 'MAX_CHUNKS_LO', 80));
   const viewMargin = Number(opts.viewMargin ?? cfg.get('view-margin', 'VIEW_MARGIN', 96));
@@ -619,6 +627,8 @@ export async function startGateway(opts = {}) {
         viewMargin,
         cooldowns: ACTION_COOLDOWN_MS,
         gateway: gwId,
+        zones,
+        zone: myZone,
       }),
     );
   }
@@ -691,7 +701,8 @@ export async function startGateway(opts = {}) {
 
   server.on('upgrade', (req, socket, head) => {
     const url = safeUrl(req.url);
-    if (!url || url.pathname !== '/ws') {
+    // /ws, or /z/<n>/ws when a proxy routes zones by path without stripping it.
+    if (!url || !(url.pathname === '/ws' || /^\/z\/\d+\/ws$/.test(url.pathname))) {
       socket.destroy();
       return;
     }
@@ -975,8 +986,12 @@ export async function startGateway(opts = {}) {
   }
 
   function metrics() {
+    let outside = 0;
+    if (zones && myZone >= 0) for (const k of chunkState.keys()) if (topo.zoneOfChunk(zones, k >> 1) !== myZone) outside++;
     return {
       gateway: gwId,
+      zone: myZone,
+      watchedOutsideZone: outside, // border overlap; should stay small
       clients: clients.size,
       players: players.size,
       watchedChunks: chunkState.size,
