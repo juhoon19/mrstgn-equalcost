@@ -296,11 +296,21 @@ export class Economy {
   }
 
   // World rewards: entries [[account, amount]] minted once per key.
-  async reward(entries, keyPrefix) {
+  // `period` names the reward period (all shards report the same one) and
+  // `cap` is the most one account may earn in it IN TOTAL: a lineage spread
+  // over 64 shards must not earn 64 times as much. The account's balance row
+  // is locked first so concurrent reports from different shards serialise.
+  async reward(entries, keyPrefix, { period = keyPrefix, cap = Infinity } = {}) {
     let paid = 0;
     for (const [acct, amount] of entries) {
       if (!(acct > 0) || !(amount > 0)) continue;
-      const r = await this.store.tx((t) => mint(t, acct, Math.floor(amount), `${keyPrefix}:${acct}`, 'reward'));
+      const r = await this.store.tx(async (t) => {
+        await t.query(`SELECT amount FROM balances WHERE account = $1${this.store.forUpdate}`, [acct]);
+        const got = await t.query("SELECT coalesce(sum(amount), 0) AS s FROM ledger WHERE to_acct = $1 AND at > $3 AND kind = 'reward' AND ref = $2", [acct, period, Date.now() - 86400000]);
+        const pay = Math.min(Math.floor(amount), cap - Number(got.rows[0].s));
+        if (pay <= 0) return { applied: false };
+        return mint(t, acct, pay, `${keyPrefix}:${acct}`, 'reward', period);
+      });
       if (r.applied) paid++;
     }
     return { paid };

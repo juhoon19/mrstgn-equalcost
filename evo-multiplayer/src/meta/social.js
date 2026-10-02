@@ -9,6 +9,7 @@ export const MAX_FRIENDS = 500;
 export const DM_MAX_LEN = 500;
 export const DM_PER_MINUTE = 20;
 export const NEW_CONVERSATIONS_PER_HOUR = 10;
+export const FRIEND_REQUESTS_PER_HOUR = 30;
 
 const pair = (x, y) => (x < y ? [x, y] : [y, x]);
 const int = (v, name) => {
@@ -42,6 +43,9 @@ export class Social {
     to = int(to, 'to');
     if (from === to) throw new AppError('BAD_ARG', '不能加自己');
     if (await this.isBlocked(from, to)) throw new AppError('BLOCKED', '无法添加该玩家');
+    // Each request pushes a notification to the target: cap them (calls for
+    // one account always reach its home replica, so this count is complete).
+    if (!this.rate(this.newConv, `friend:${from}`, 3600000, FRIEND_REQUESTS_PER_HOUR)) throw new AppError('RATE', `每小时最多发 ${FRIEND_REQUESTS_PER_HOUR} 个好友申请`);
     const exists = await this.store.query('SELECT id FROM accounts WHERE id = $1', [to]);
     if (!exists.rows.length) throw new AppError('NOT_FOUND', '没有这个玩家');
     const [x, y] = pair(from, to);

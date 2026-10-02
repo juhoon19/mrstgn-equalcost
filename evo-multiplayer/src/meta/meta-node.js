@@ -52,6 +52,9 @@ export async function startMeta(opts = {}) {
     if (!quiet) console.log(`[meta ${id}]`, ...a);
   };
   const M = urls.length;
+  // Most coins one account can earn from its living lineage per period,
+  // summed over every shard.
+  const rewardCap = Number(opts.rewardCap ?? cfg.get('reward-cap', 'REWARD_CAP', 3));
   const home = (acct) => homeReplica(acct, M);
 
   const store = opts.store ?? (await openStoreWithRetry(dbUrl, log));
@@ -370,6 +373,10 @@ export async function startMeta(opts = {}) {
     const out = {};
     out.sessions = (await store.query('DELETE FROM sessions WHERE expires < $1', [now])).count;
     out.throttle = (await store.query('DELETE FROM throttle WHERE t < $1', [now - 3600000])).count;
+    // Trades nobody touched for 3 days are cancelled (and both sides told).
+    const stale = await store.query("UPDATE trades SET status = 'cancelled', updated = $1 WHERE status = 'open' AND updated < $2 RETURNING *", [now, now - 3 * 86400000]);
+    out.trades = stale.rows.length;
+    for (const row of stale.rows) economy.notifyTrade(economy.tradeView(row));
     out.messages = retentionDays > 0 ? await deleteBatched('messages', 'at < $1', [now - retentionDays * 86400000]) : 0;
     if (out.sessions || out.messages) log(`housekeeping: ${out.sessions} expired sessions, ${out.messages} old messages removed`);
     return out;
@@ -418,7 +425,9 @@ export async function startMeta(opts = {}) {
         if (msg.t === 'deliver') deliver(Number(msg.acct), msg.ev);
         else if (msg.t === 'presence') for (const a of msg.accts) msg.online ? online.add(a) : online.delete(a);
       } else if (role === 'shard') {
-        if (msg.t === 'reward') economy.reward(msg.entries || [], msg.key).catch((err) => log('reward failed', err.message));
+        if (msg.t === 'reward' && typeof msg.key === 'string') {
+          economy.reward(msg.entries || [], msg.key, { period: String(msg.period || msg.key), cap: rewardCap }).catch((err) => log('reward failed', err.message));
+        }
       }
     });
     ws.on('close', () => {

@@ -1003,6 +1003,15 @@ export async function startGateway(opts = {}) {
       res.setHeader('content-type', MIME[path.extname(file)] || 'application/octet-stream');
       res.setHeader('cache-control', 'no-cache');
       res.setHeader('x-content-type-options', 'nosniff');
+      // The login session lives in localStorage: no script may run except
+      // our own files, and no other site may frame the pages (clickjacking
+      // on the admin console). Inline styles are used by the pages.
+      res.setHeader(
+        'content-security-policy',
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      );
+      res.setHeader('referrer-policy', 'no-referrer');
+      res.setHeader('x-frame-options', 'DENY');
       res.end(body);
     });
   });

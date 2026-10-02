@@ -117,7 +117,7 @@ export async function startShard(opts = {}) {
           if (!entries.length) return;
           const period = Math.floor(Date.now() / rewardEvery);
           const i = meta.pick(shardId % meta.size);
-          if (i >= 0) meta.send(i, { t: 'reward', key: `life:${worldId}:${period}:${shardId}`, entries });
+          if (i >= 0) meta.send(i, { t: 'reward', key: `life:${worldId}:${period}:${shardId}`, period: `life:${worldId}:${period}`, entries });
         }, rewardEvery)
       : null;
   // Lineage adoption: a guest who registers or logs in keeps their

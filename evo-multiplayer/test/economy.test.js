@@ -189,6 +189,13 @@ for (const url of urls) {
       const fee = await store.query('SELECT amount FROM ledger WHERE key = $1', [`buy:${s.id}:fee`]);
       assert.equal(Number(fee.rows[0].amount), Math.max(1, Math.ceil(Number(s.price) * MARKET_FEE)));
     }
+    // A lineage spread over many shards earns at most the cap per period.
+    const rich = ids[0];
+    const b0 = await eco.balance(rich);
+    await Promise.all(Array.from({ length: 16 }, (_, sh) => eco.reward([[rich, 3]], `life:w:7:${sh}`, { period: 'life:w:7', cap: 3 })));
+    assert.equal((await eco.balance(rich)) - b0, 3, 'cap is per account per period, across shards');
+    await eco.reward([[rich, 3]], 'life:w:8:0', { period: 'life:w:8', cap: 3 });
+    assert.equal((await eco.balance(rich)) - b0, 6, 'next period pays again');
     // Reward keys applied exactly once each.
     const rw = await store.query("SELECT count(*) AS n FROM ledger WHERE key LIKE 'reward:%'");
     assert.equal(Number(rw.rows[0].n), 10);
