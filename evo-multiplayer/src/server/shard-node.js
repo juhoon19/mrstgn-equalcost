@@ -67,6 +67,7 @@ export async function startShard(opts = {}) {
   let booted = false;
   let paused = false; // test/admin freeze (see pause())
   const pausedPeerQueue = [];
+  const pauseWaiters = [];
   let bootResolve;
   const bootPromise = new Promise((r) => (bootResolve = r));
   let saving = false;
@@ -980,6 +981,10 @@ export async function startShard(opts = {}) {
     if (stopped) return;
     try {
       if (!paused) tick();
+      if (pauseWaiters.length) {
+        paused = true;
+        for (const r of pauseWaiters.splice(0)) r();
+      }
     } catch (err) {
       console.error(`[shard ${shardId}] tick failed`, err);
     }
@@ -995,8 +1000,16 @@ export async function startShard(opts = {}) {
     port,
     stats,
     // Freezes the simulation (used by tests to compare clients with truth).
-    pause() {
-      paused = true;
+    // afterTick: freeze at the end of the next tick, so that migrants
+    // adopted since the last tick have been sent to clients in that tick's
+    // frames (an immediate pause can catch them adopted but never framed).
+    // Resolves once frozen.
+    pause({ afterTick = false } = {}) {
+      if (!afterTick || paused) {
+        paused = true;
+        return Promise.resolve();
+      }
+      return new Promise((r) => pauseWaiters.push(r));
     },
     resume() {
       paused = false;

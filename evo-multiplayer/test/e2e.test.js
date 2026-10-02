@@ -92,7 +92,7 @@ test('client replicas (both quality tiers) match the authoritative state exactly
   hi.ws.send(encodeView(0, 0, W, W, TIER_HI));
   lo.ws.send(encodeView(0, 0, W, W, TIER_LO));
   await sleep(3000); // let entities move, migrate across the shard seam, be born and die
-  for (const s of shards) s.pause();
+  await Promise.all(shards.map((s) => s.pause({ afterTick: true })));
   // Always resume and disconnect, so one failure can't cascade into the
   // following tests (paused world, per-IP connection cap used up).
   try {
@@ -152,7 +152,7 @@ test('chunks handed between live shards: clients stay exact and every map agrees
     assert.ok(await until(() => shards[plan.to].region.chunks.has(plan.id)), 'chunk never arrived');
   }
   await sleep(1500); // new owners' keyframes reach the client
-  for (const s of shards) s.pause();
+  await Promise.all(shards.map((s) => s.pause({ afterTick: true })));
   try {
     await drained([c]);
     // Every chunk lives on exactly one shard, and every map says so.
