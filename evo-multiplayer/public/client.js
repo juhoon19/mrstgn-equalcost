@@ -731,27 +731,58 @@ function fieldImage(chunkId, f) {
   return img;
 }
 
-function drawSummary() {
-  if (!summary) return;
-  const S = welcome.world.chunkSize;
-  const cwW = S * summary.bw; // world size of one summary cell
-  const chW = S * summary.bh;
+// The world overview (S_SUMMARY, every 2-6 s) is painted once per update
+// into small offscreen images, which every frame just scales into place:
+// redrawing thousands of rectangles 60 times a second cost several ms.
+const SUMMARY_PX = 10; // offscreen pixels per summary cell
+const summaryCache = { src: null, main: null, mini: null };
+function paintSummary(palette) {
+  const c = document.createElement('canvas');
+  c.width = summary.cols * SUMMARY_PX;
+  c.height = summary.rows * SUMMARY_PX;
+  const g = c.getContext('2d');
   const per = summary.bw * summary.bh; // chunks per cell
+  const K = SUMMARY_PX;
+  const inset = Math.round(K * 0.2);
   for (let r = 0; r < summary.rows; r++) {
     for (let q = 0; q < summary.cols; q++) {
       const i = r * summary.cols + q;
       const n = summary.nutrient[i] / 255;
-      ctx.fillStyle = `rgb(${20 + n * 20},${26 + n * 90},${36 + n * 40})`;
-      ctx.fillRect(q * cwW, r * chW, cwW + 0.5, chW + 0.5);
+      g.fillStyle = palette.ground(n);
+      g.fillRect(q * K, r * K, K, K);
       const pop = summary.pop[i] / per;
       if (pop > 0.5) {
-        const a = Math.min(0.85, 0.15 + pop / 120);
         const rgb = summary.rgb[i];
-        ctx.fillStyle = `rgba(${rgb >> 16},${(rgb >> 8) & 255},${rgb & 255},${a})`;
-        ctx.fillRect(q * cwW + cwW * 0.18, r * chW + chW * 0.18, cwW * 0.64, chW * 0.64);
+        g.fillStyle = `rgba(${rgb >> 16},${(rgb >> 8) & 255},${rgb & 255},${palette.alpha(pop)})`;
+        g.fillRect(q * K + inset, r * K + inset, K - 2 * inset, K - 2 * inset);
       }
     }
   }
+  return c;
+}
+const MAIN_PALETTE = {
+  ground: (n) => `rgb(${20 + n * 20},${26 + n * 90},${36 + n * 40})`,
+  alpha: (pop) => Math.min(0.85, 0.15 + pop / 120),
+};
+const MINI_PALETTE = {
+  ground: (n) => `rgb(${14 + n * 20},${20 + n * 80},${28 + n * 30})`,
+  alpha: (pop) => Math.min(0.9, 0.2 + pop / 100),
+};
+function summaryImages() {
+  if (summaryCache.src !== summary) {
+    summaryCache.src = summary;
+    summaryCache.main = paintSummary(MAIN_PALETTE);
+    summaryCache.mini = paintSummary(MINI_PALETTE);
+  }
+  return summaryCache;
+}
+
+function drawSummary() {
+  if (!summary) return;
+  const S = welcome.world.chunkSize;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(summaryImages().main, 0, 0, summary.cols * S * summary.bw, summary.rows * S * summary.bh);
+  ctx.imageSmoothingEnabled = true;
 }
 
 function render(now) {
@@ -786,7 +817,7 @@ function render(now) {
   if (!detailed) drawSummary();
   else {
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
+    ctx.imageSmoothingQuality = 'low'; // 'high' (bicubic) made zoomed-in frames 4x slower in software canvas
     for (const id of detailed) {
       const f = world.fields.get(id);
       const cx = id % welcome.world.chunksX;
@@ -934,20 +965,8 @@ function drawMinimap() {
     // Cells may overhang the world edge when the grid does not divide evenly.
     const cw = (w * summary.bw * welcome.world.chunkSize) / topo.width;
     const ch = (h * summary.bh * welcome.world.chunkSize) / topo.height;
-    const per = summary.bw * summary.bh;
-    for (let i = 0; i < summary.pop.length; i++) {
-      const cx = i % summary.cols;
-      const cy = (i - cx) / summary.cols;
-      const n = summary.nutrient[i] / 255;
-      mctx.fillStyle = `rgb(${14 + n * 20},${20 + n * 80},${28 + n * 30})`;
-      mctx.fillRect(cx * cw, cy * ch, cw + 0.5, ch + 0.5);
-      const pop = summary.pop[i] / per;
-      if (pop > 0.5) {
-        const rgb = summary.rgb[i];
-        mctx.fillStyle = `rgba(${rgb >> 16},${(rgb >> 8) & 255},${rgb & 255},${Math.min(0.9, 0.2 + pop / 100)})`;
-        mctx.fillRect(cx * cw + cw * 0.2, cy * ch + ch * 0.2, cw * 0.6, ch * 0.6);
-      }
-    }
+    mctx.imageSmoothingEnabled = false;
+    mctx.drawImage(summaryImages().mini, 0, 0, summary.cols * cw, summary.rows * ch);
   }
   const [x0, y0, x1, y1] = viewRect();
   mctx.strokeStyle = '#ffffff';
