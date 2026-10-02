@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "scripts": {
     "start": "node src/launch.js",
@@ -13,7 +13,8 @@
     "shard": "node src/server/shard-node.js",
     "gateway": "node src/server/gateway-node.js",
     "bots": "node bench/bots.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --no-warnings --test test/*.test.js",
+    "test:pg": "node --no-warnings --test --test-concurrency=1 test/economy.test.js test/meta.test.js"
   },
   "license": "MIT",
   "dependencies": {

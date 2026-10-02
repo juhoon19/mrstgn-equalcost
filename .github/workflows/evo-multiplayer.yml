@@ -1,0 +1,61 @@
+# Tests for evo-multiplayer/ (the multiplayer game backbone). The SQLite run
+# covers everything; the PostgreSQL run repeats the account/economy tests on
+# the production database (they truncate it, so they run one file at a time).
+name: evo-multiplayer
+
+on:
+  push:
+    paths: ['evo-multiplayer/**', '.github/workflows/evo-multiplayer.yml']
+  pull_request:
+    paths: ['evo-multiplayer/**', '.github/workflows/evo-multiplayer.yml']
+
+defaults:
+  run:
+    working-directory: evo-multiplayer
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: evo
+          POSTGRES_PASSWORD: evo
+          POSTGRES_DB: evo
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U evo" --health-interval 3s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: evo-multiplayer/package-lock.json
+      - run: npm ci
+      - name: All tests (SQLite)
+        run: npm test
+      - name: Account and economy tests (PostgreSQL)
+        run: npm run test:pg
+        env:
+          TEST_DATABASE_URL: postgres://evo:evo@127.0.0.1:5432/evo
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t evo-multiplayer .
+      - name: Smoke test (all-in-one container)
+        run: |
+          docker run -d --name evo -p 8080:8080 -e SHARDS=2 -e GATEWAYS=1 -e WORLD=8x8 evo-multiplayer
+          ok=
+          for i in $(seq 1 40); do
+            if curl -fs localhost:8080/metrics | grep -q '"meta":\[{"replica":0,"open":true}\]'; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs evo | tail -20
+          test -n "$ok"
