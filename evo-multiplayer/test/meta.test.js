@@ -445,3 +445,37 @@ test('housekeeping removes expired sessions and messages past retention, nothing
   assert.equal(st.body.balanceSum, 0);
   assert.ok(st.body.items >= 1);
 });
+
+test('revoked sessions close open sockets elsewhere; mods cannot lift bans', async () => {
+  const kim = await account(gw1, 'kim');
+  // The same account, logged in a second time on another gateway (e.g. a hijacker).
+  const r = await (async () => {
+    const g = client(gw2);
+    await g.ready();
+    const x = await g.rpc('auth.login', { name: 'kim', password: 'password123' });
+    g.close();
+    return x;
+  })();
+  const other = client(gw2, { session: r.token });
+  await other.ready();
+  assert.equal(other.welcome.account.name, 'kim');
+  // The owner logs out everywhere: the other socket is closed, the owner's own
+  // (whose session is also gone) too - nothing keeps trading on a dead session.
+  await kim.rpc('auth.logoutAll');
+  assert.ok(await until(() => other.closeCode === 4005), 'hijacked socket closed');
+  assert.ok(await until(() => kim.closeCode === 4005));
+
+  // A mod may lift mutes but not bans.
+  const mod = await account(gw1, 'modlift');
+  await metas[0].accounts.setRole(mod.welcome.pid, 'mod');
+  const tok = (await fetch(`http://127.0.0.1:${gw1.port}/admin/api/login`, { method: 'POST', body: JSON.stringify({ name: 'modlift', password: 'password123' }) }).then((x) => x.json())).token;
+  const g = client(gw1);
+  await g.ready();
+  const ban = await adminHttp(gw1, 'ban', { pid: g.welcome.pid, minutes: 60 });
+  assert.equal(ban.status, 200);
+  await until(async () => (await adminHttp(gw1, 'state')).body.sanctions?.some((x) => x.id === ban.body.id));
+  await sleep(200);
+  assert.equal((await adminHttp(gw1, 'lift', { id: ban.body.id }, tok)).status, 403);
+  assert.equal((await adminHttp(gw1, 'lift', { id: ban.body.id })).status, 200);
+  mod.close();
+});

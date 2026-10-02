@@ -271,6 +271,15 @@ export class Economy {
   async captured(acct, sourceKey, data) {
     if (typeof sourceKey !== 'string' || !sourceKey.startsWith('cap:')) throw new AppError('BAD_ARG', 'bad source key');
     return this.store.tx(async (t) => {
+      // The daily quota is enforced here, under the account's row lock (the
+      // gateway's pre-check alone can be raced by parallel requests). A
+      // retry of an already recorded capture is not a new capture.
+      await t.query(`SELECT amount FROM balances WHERE account = $1${this.store.forUpdate}`, [acct]);
+      const known = await t.query('SELECT 1 FROM items WHERE source_key = $1', [sourceKey]);
+      if (!known.rows.length) {
+        const n = await t.query("SELECT count(*) AS n FROM item_log WHERE to_acct = $1 AND action = 'create' AND at > $2", [acct, Date.now() - 86400000]);
+        if (Number(n.rows[0].n) >= CAPTURES_PER_DAY) throw new AppError('LIMIT', '今天的收集次数已用完');
+      }
       const r = await createItem(t, { owner: acct, kind: 'specimen', data, sourceKey });
       if (!r.created) {
         // Same organism again (a retried request, or a shard that crashed

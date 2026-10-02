@@ -183,6 +183,14 @@ export async function startMeta(opts = {}) {
     }
   }
 
+  // Sessions of `acct` were revoked (password change, "log out everywhere",
+  // recovery): gateways re-check every open connection of that account and
+  // close those whose session is gone - otherwise a hijacker's open socket
+  // would keep trading after the owner secured the account.
+  function sessionsChanged(acct) {
+    deliver(acct, { type: 'sessions-changed' });
+  }
+
   async function autoMute(acct, until, reasons) {
     await accounts.setSanction(acct, { mutedUntil: until });
     await social.audit(0, 'auto-mute', `acct:${acct}`, { until, reasons });
@@ -219,12 +227,22 @@ export async function startMeta(opts = {}) {
   const methods = {
     'auth.register': (a, x) => accounts.register({ name: a.name, password: a.password, hue: a.hue, ua: x.ua, ip: x.ip }),
     'auth.login': (a, x) => accounts.login({ name: a.name, password: a.password, totp: a.totp, ua: x.ua, ip: x.ip }),
-    'auth.recover': (a, x) => accounts.recover({ name: a.name, code: a.code, newPassword: a.newPassword, ua: x.ua, ip: x.ip }),
+    'auth.recover': async (a, x) => {
+      const r = await accounts.recover({ name: a.name, code: a.code, newPassword: a.newPassword, ua: x.ua, ip: x.ip });
+      sessionsChanged(r.account.id);
+      return r;
+    },
     'auth.resume': (a) => accounts.resume(a.token),
     'auth.logout': (a) => accounts.logout(a.token),
-    'auth.logoutAll': (a, x) => accounts.logoutAll(need(x.acct)),
+    'auth.logoutAll': async (a, x) => {
+      await accounts.logoutAll(need(x.acct));
+      sessionsChanged(x.acct);
+    },
     'auth.sessions': (a, x) => accounts.sessions(need(x.acct)),
-    'auth.password': (a, x) => accounts.changePassword(need(x.acct), a.old, a.new),
+    'auth.password': async (a, x) => {
+      await accounts.changePassword(need(x.acct), a.old, a.new);
+      sessionsChanged(x.acct);
+    },
     'auth.totpSetup': (a, x) => accounts.totpSetup(need(x.acct)),
     'auth.totpEnable': (a, x) => accounts.totpEnable(need(x.acct), a.code),
     'auth.totpDisable': (a, x) => accounts.totpDisable(need(x.acct), a.code),

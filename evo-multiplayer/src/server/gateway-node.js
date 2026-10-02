@@ -308,6 +308,18 @@ export async function startGateway(opts = {}) {
         const c = conns.get(conn);
         if (!c || !ev) return;
         if (ev.type === 'muted') c.mutedUntil = Number(ev.until) || 0;
+        if (ev.type === 'sessions-changed') {
+          // Only close connections whose own session no longer exists.
+          meta
+            .call('auth.resume', { token: c.session }, { key: c.session })
+            .then((a) => {
+              if (!a || a.id !== c.acct) c.ws.close(4005, 'session revoked');
+            })
+            .catch((err) => {
+              if (err.code === 'BANNED') c.ws.close(4003, 'banned');
+            });
+          return;
+        }
         send(c, JSON.stringify({ t: 'ev', ev }));
         if (ev.type === 'banned') c.ws.close(4003, 'banned');
       },
@@ -364,10 +376,18 @@ export async function startGateway(opts = {}) {
     const [x, y] = worldPoint(a, c);
     const entityId = Number(a.entityId);
     if (!Number.isSafeInteger(entityId) || entityId <= 0) throw new MetaError('BAD_ARG', '目标无效');
-    if (!(await meta.call('item.captureAllowed', {}, { acct: c.acct }))) throw new MetaError('LIMIT', '今天的收集次数已用完');
-    const res = await shardRequest(topo.ownerAt(x, y), { t: 'capture', pid: c.pid, entityId, x, y });
-    if (!res.ok) throw new MetaError(res.code, res.msg || '收集失败');
-    return metaRetry('item.captured', { key: res.key, data: res.data }, { acct: c.acct });
+    // One capture at a time per connection: parallel requests would all pass
+    // the quota pre-check and then lose their organisms to the hard limit.
+    if (c.capturing) throw new MetaError('BUSY', '上一次收集还没完成');
+    c.capturing = true;
+    try {
+      if (!(await meta.call('item.captureAllowed', {}, { acct: c.acct }))) throw new MetaError('LIMIT', '今天的收集次数已用完');
+      const res = await shardRequest(topo.ownerAt(x, y), { t: 'capture', pid: c.pid, entityId, x, y });
+      if (!res.ok) throw new MetaError(res.code, res.msg || '收集失败');
+      return await metaRetry('item.captured', { key: res.key, data: res.data }, { acct: c.acct });
+    } finally {
+      c.capturing = false;
+    }
   }
 
   // Inventory item -> world organism. The item (and fee) is consumed first,
@@ -464,6 +484,7 @@ export async function startGateway(opts = {}) {
     const got = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const fail = () => {
       adminFails.set(ip, { n: (f && Date.now() - f.t < 60000 ? f.n : 0) + 1, t: Date.now() });
+      if (adminFails.size > 10000) for (const [k, v] of adminFails) if (Date.now() - v.t > 60000) adminFails.delete(k);
       return null;
     };
     if (!got) return fail();
@@ -474,7 +495,7 @@ export async function startGateway(opts = {}) {
     }
     if (!meta.enabled || !got.startsWith('S')) return fail();
     const hit = staffCache.get(got);
-    if (hit && Date.now() - hit.t < 30000) return hit.who;
+    if (hit && Date.now() - hit.t < 10000) return hit.who; // demotions/logouts apply within 10 s
     let acct = null;
     try {
       acct = await meta.call('auth.resume', { token: got }, { key: got });
@@ -563,6 +584,10 @@ export async function startGateway(opts = {}) {
       if (!args) return json(400, { error: 'bad JSON' });
       // Lifting a world-side sanction on an account lifts the account's too.
       const lifted = op === 'lift' ? sanctionList.find((x) => x.id === Number(args.id)) : null;
+      // Only those who may ban may unban (mods can lift mutes only).
+      if (op === 'lift' && (!lifted || lifted.kind === 'ban') && ROLE_RANK[who.role] < ROLE_RANK.admin) {
+        return json(403, { error: '只有管理员能解除封禁' });
+      }
       const r = await adminRequest(op, args);
       if (r.ok && meta.enabled && lifted && lifted.pid > 0 && lifted.pid < GUEST_PID_MIN) {
         const body = lifted.kind === 'mute' ? { id: lifted.pid, muteMinutes: 0 } : { id: lifted.pid, banMinutes: 0 };

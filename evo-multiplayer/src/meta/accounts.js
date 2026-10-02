@@ -71,12 +71,20 @@ export class Accounts {
     return ip ? sha(`${this.pepper}:${ip}`).slice(0, 22) : '';
   }
 
-  // Failed logins per "u:name" / "i:<ip hash>": 10 within 10 minutes locks
-  // that key for the rest of the window.
+  // Failed attempts within 10 minutes, counted per IP ("i:"), per name+IP
+  // ("n:") and per name ("u:"). One IP is locked after 10 failures overall
+  // or 10 on one name. The per-name count must NOT lock the name for
+  // everyone (anyone could then lock any player, staff included, out of
+  // their account with 10 wrong passwords): once a name has had 100 failures
+  // from anywhere, only IPs that already failed on it are refused, so the
+  // owner on their own network still gets in, and a botnet gets one guess
+  // per address.
   async throttled(keys) {
-    const r = await this.store.query(`SELECT n, t FROM throttle WHERE key IN (${keys.map((_, i) => `$${i + 1}`).join(', ')})`, keys);
+    const r = await this.store.query(`SELECT key, n, t FROM throttle WHERE key IN (${keys.map((_, i) => `$${i + 1}`).join(', ')})`, keys);
     const now = Date.now();
-    return r.rows.some((f) => Number(f.n) >= 10 && now - Number(f.t) < 10 * 60000);
+    const n = {};
+    for (const f of r.rows) if (now - Number(f.t) < 10 * 60000) n[f.key[0]] = Number(f.n);
+    return (n.i || 0) >= 10 || (n.n || 0) >= 10 || ((n.u || 0) >= 100 && (n.n || 0) >= 1);
   }
 
   async noteFail(keys) {
@@ -91,7 +99,9 @@ export class Accounts {
   }
 
   throttleKeys(name, ip) {
-    return [`u:${String(name ?? '').toLowerCase()}`, `i:${this.ipKey(ip)}`];
+    const lc = String(name ?? '').toLowerCase();
+    const h = this.ipKey(ip);
+    return [`u:${lc}`, `i:${h}`, `n:${lc}:${h}`];
   }
 
   async newSession(t, accountId, ua) {
@@ -204,8 +214,14 @@ export class Accounts {
 
   async changePassword(accountId, oldPw, newPw) {
     if (!validPassword(newPw)) throw new AppError('BAD_PASSWORD', '密码至少 8 位');
+    // A stolen session must not be able to guess the old password freely.
+    const keys = [`i:pw:${accountId}`];
+    if (await this.throttled(keys)) throw new AppError('THROTTLED', '尝试次数过多，请 10 分钟后再试');
     const r = await this.store.query('SELECT pass FROM accounts WHERE id = $1', [accountId]);
-    if (!r.rows[0] || !(await checkPassword(String(oldPw ?? ''), r.rows[0].pass))) throw new AppError('BAD_LOGIN', '原密码错误');
+    if (!r.rows[0] || !(await checkPassword(String(oldPw ?? ''), r.rows[0].pass))) {
+      await this.noteFail(keys);
+      throw new AppError('BAD_LOGIN', '原密码错误');
+    }
     await this.store.query('UPDATE accounts SET pass = $1 WHERE id = $2', [await hashPassword(newPw), accountId]);
     await this.logoutAll(accountId); // everywhere else must log in again
   }
@@ -237,7 +253,10 @@ export class Accounts {
 
   async totpSetup(accountId) {
     const secret = newSecret();
-    const a = await this.store.query('SELECT display FROM accounts WHERE id = $1', [accountId]);
+    const a = await this.store.query('SELECT display, totp_enabled FROM accounts WHERE id = $1', [accountId]);
+    // Replacing an active secret would switch 2FA off without a code: a stolen
+    // session could then strip 2FA (or lock the owner out with its own).
+    if (Number(a.rows[0]?.totp_enabled)) throw new AppError('TOTP_ENABLED', '两步验证已开启；要更换，请先用验证码关闭');
     await this.store.query('UPDATE accounts SET totp_secret = $1, totp_enabled = 0, totp_last = -1 WHERE id = $2', [secret, accountId]);
     return { secret, uri: otpauthUri(secret, a.rows[0]?.display ?? String(accountId)) };
   }

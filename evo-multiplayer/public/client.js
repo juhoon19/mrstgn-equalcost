@@ -140,6 +140,14 @@ function onActiveClose(sock, ev) {
     addChatLine('系统', '你已被管理员封禁，无法进入。');
     return; // don't hammer the server
   }
+  if (ev.code === 4005) {
+    // Logged out elsewhere (password changed / "log out everywhere"):
+    // continue as a guest.
+    store.set('session', '');
+    addChatLine('系统', '你的登录已在其他地方失效（改了密码或退出了所有设备），已切换为游客。');
+    setTimeout(() => connect(), 500);
+    return;
+  }
   if (ev.code === 4004) {
     setStatus('已在别处打开');
     addChatLine('系统', '这个账号在另一个页面打开了。刷新本页可以切回来。');

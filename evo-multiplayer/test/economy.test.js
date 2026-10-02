@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openStore, SCHEMA_VERSION } from '../src/meta/store.js';
 import { Accounts, STARTER_GRANT } from '../src/meta/accounts.js';
-import { Economy, MARKET_FEE, RELEASE_FEE } from '../src/meta/economy.js';
+import { Economy, MARKET_FEE, RELEASE_FEE, CAPTURES_PER_DAY } from '../src/meta/economy.js';
 import { mint, move } from '../src/meta/ledger.js';
 import { hotp, totp, verifyTotp, base32Encode } from '../src/meta/totp.js';
 
@@ -101,9 +101,17 @@ for (const url of urls) {
     await r1.totpEnable(id, code);
     // The same code used on the other replica is a replay.
     await assert.rejects(r2.login({ name: 'shared', password: 'password123', totp: code, ip: '1' }), { code: 'BAD_TOTP' });
-    // Failures counted on one replica lock the name on the other.
-    for (let i = 0; i < 10; i++) await (i % 2 ? r1 : r2).login({ name: 'shared', password: 'wrong', ip: `x${i}` }).catch(() => {});
-    await assert.rejects(r2.login({ name: 'shared', password: 'password123', ip: 'fresh' }), { code: 'THROTTLED' });
+    // An active 2FA secret cannot be replaced without a code (stolen session).
+    await assert.rejects(r2.totpSetup(id), { code: 'TOTP_ENABLED' });
+    // Failures from one IP, spread over both replicas, lock that IP...
+    for (let i = 0; i < 10; i++) await (i % 2 ? r1 : r2).login({ name: 'shared', password: 'wrong', ip: 'attacker' }).catch(() => {});
+    await assert.rejects(r2.login({ name: 'shared', password: 'password123', ip: 'attacker' }), { code: 'THROTTLED' });
+    // ...but not the owner: nobody can lock a player out of their account.
+    await assert.rejects(r1.login({ name: 'shared', password: 'password123', ip: 'owner' }), { code: 'TOTP_REQUIRED' });
+    // A botnet hammering one name gets one guess per address once the name is hot.
+    for (let i = 0; i < 100; i++) await r1.login({ name: 'shared', password: 'wrong', ip: `bot${i}` }).catch(() => {});
+    await assert.rejects(r2.login({ name: 'shared', password: 'password123', ip: 'bot5' }), { code: 'THROTTLED' });
+    await assert.rejects(r2.login({ name: 'shared', password: 'password123', ip: 'owner' }), { code: 'TOTP_REQUIRED' });
     // Registrations from one IP are counted across replicas.
     await r2.register({ name: 'shared2', password: 'password123', ip: '10.0.0.1' });
     await r1.register({ name: 'shared3', password: 'password123', ip: '10.0.0.1' });
@@ -189,6 +197,12 @@ for (const url of urls) {
       const fee = await store.query('SELECT amount FROM ledger WHERE key = $1', [`buy:${s.id}:fee`]);
       assert.equal(Number(fee.rows[0].amount), Math.max(1, Math.ceil(Number(s.price) * MARKET_FEE)));
     }
+    // The daily capture quota holds under parallel requests.
+    const hoarder = ids[1];
+    const already = (await store.query("SELECT count(*) AS n FROM item_log WHERE to_acct = $1 AND action = 'create'", [hoarder])).rows[0].n;
+    const burst = await Promise.allSettled(Array.from({ length: 60 }, (_, k) => eco.captured(hoarder, `cap:burst:${k}`, { g: 1 })));
+    assert.equal(burst.filter((x) => x.status === 'fulfilled').length, CAPTURES_PER_DAY - Number(already));
+    assert.ok(burst.filter((x) => x.status === 'rejected').every((x) => x.reason.code === 'LIMIT'));
     // A lineage spread over many shards earns at most the cap per period.
     const rich = ids[0];
     const b0 = await eco.balance(rich);
