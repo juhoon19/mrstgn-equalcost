@@ -52,6 +52,7 @@ import { Link, readClusterConfig } from './link.js';
 import { MetaClient, MetaError } from '../meta/meta-client.js';
 import { CLIENT_METHODS, ADMIN_METHODS, GUEST_PID_MIN } from '../meta/methods.js';
 import { Moderator } from '../meta/moderation.js';
+import { powCheck } from '../shared/pow.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
@@ -399,7 +400,17 @@ export async function startGateway(opts = {}) {
     for (let k = 0; k < 6; k++) {
       const s = await shardRequest(topo.ownerAt(x, y), { t: 'spawn', key: r.spawnKey, pid: c.pid, x, y, data: r.data });
       if (s.ok) return { item: r.item, entity: s.id ?? 0 };
-      if (s.code === 'BAD_ITEM') break;
+      // Retry only when the shard certainly did not spawn it: the point had
+      // moved to another shard, or the request never left. After a timeout it
+      // may have been spawned, and a retry landing on another (or restarted)
+      // shard would spawn it twice - and both copies could be captured.
+      if (s.code !== 'MOVED' && s.code !== 'SHARD_DOWN') {
+        if (s.code === 'TIMEOUT') {
+          log(`release ${r.spawnKey}: no answer from the shard; not retrying (it may have spawned)`);
+          return { item: r.item, entity: 0, uncertain: true };
+        }
+        break;
+      }
       await sleep(300 * (k + 1));
     }
     log(`release ${r.spawnKey} for ${c.acct} could not spawn`);
@@ -408,6 +419,27 @@ export async function startGateway(opts = {}) {
   }
 
   const AUTH_ENTRY = new Set(['auth.register', 'auth.login', 'auth.recover']);
+  // Registration proof of work (src/shared/pow.js). POW_BITS=0 disables it.
+  const powBits = Number(opts.powBits ?? cfg.get('pow-bits', 'POW_BITS', 16));
+  const powUsed = new Map(); // challenge -> expiry (one use each)
+  function powChallenge() {
+    const body = `${Date.now()}.${crypto.randomBytes(9).toString('base64url')}`;
+    const sig = crypto.createHmac('sha256', tokenSecret).update('pow:' + body).digest('base64url').slice(0, 16);
+    return `${body}.${sig}`;
+  }
+  async function powVerify(pow) {
+    if (!pow || typeof pow.challenge !== 'string') return false;
+    const [ts, rnd, sig] = pow.challenge.split('.');
+    const good = crypto.createHmac('sha256', tokenSecret).update(`pow:${ts}.${rnd}`).digest('base64url').slice(0, 16);
+    if (typeof sig !== 'string' || sig.length !== good.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return false;
+    const age = Date.now() - Number(ts);
+    if (!(age >= 0 && age < 10 * 60000)) return false;
+    if (powUsed.has(pow.challenge)) return false;
+    if (!(await powCheck(pow.challenge, Number(pow.nonce), powBits))) return false;
+    powUsed.set(pow.challenge, Number(ts) + 10 * 60000);
+    if (powUsed.size > 50000) for (const [k, exp] of powUsed) if (exp < Date.now()) powUsed.delete(k);
+    return true;
+  }
   const registrations = new Map(); // ip -> [t]
   // GUESTS_CAN_CHAT=false: only logged-in players may talk (with accounts on,
   // a banned account can otherwise come back as a guest and keep chatting).
@@ -425,12 +457,14 @@ export async function startGateway(opts = {}) {
     try {
       if (!meta.enabled) throw new MetaError('NO_META', '这个服务器没有启用账号系统');
       let r;
-      if (m === 'item.capture') r = await capture(c, a);
+      if (m === 'auth.challenge') r = { challenge: powChallenge(), bits: powBits };
+      else if (m === 'item.capture') r = await capture(c, a);
       else if (m === 'item.release') r = await release(c, a);
       else {
         if (!Object.hasOwn(CLIENT_METHODS, m)) throw new MetaError('NO_METHOD', '未知操作');
         if (CLIENT_METHODS[m] && !c.acct) throw new MetaError('LOGIN_REQUIRED', '请先登录');
         if (m === 'auth.register') {
+          if (powBits > 0 && !(await powVerify(a.pow))) throw new MetaError('POW', '注册校验失败，请重试');
           const now = Date.now();
           const list = (registrations.get(c.ip) || []).filter((t) => now - t < 3600000);
           if (list.length >= registerPerHour) throw new MetaError('RATE', '这个网络注册太频繁，请稍后再试');

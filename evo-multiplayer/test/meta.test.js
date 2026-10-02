@@ -13,6 +13,7 @@ import { openStore } from '../src/meta/store.js';
 import { loadGame } from '../src/server/game-loader.js';
 import { encodeView, encodeAction, ACTIONS } from '../src/shared/protocol.js';
 import { RELEASE_FEE } from '../src/meta/economy.js';
+import { powSolve, powCheck } from '../src/shared/pow.js';
 import { STARTER_GRANT } from '../src/meta/accounts.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -45,7 +46,7 @@ before(async () => {
   metas = await Promise.all(metaUrls.map((u, i) => startMeta({ id: i, urls: metaUrls, port: base + 10 + i, secret, store, quiet: true, registerPerHour: 1000 })));
   const game = await loadGame('soup');
   shard = await startShard({ shard: 0, port: base, topology, secret, game, quiet: true, balance: false, metaUrls, worldId: 'test', rewardEvery: 0.5, rewardCap: 3 });
-  const g = () => startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, adminToken: ADMIN, maxPerIp: 100, metaUrls, registerPerHour: 1000 });
+  const g = () => startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, adminToken: ADMIN, maxPerIp: 100, metaUrls, registerPerHour: 1000, powBits: 0 });
   gw1 = await g();
   gw2 = await g();
   await sleep(400);
@@ -396,7 +397,7 @@ test('world-side mute/ban from the chat log also sanction the account', async ()
 });
 
 test('GUESTS_CAN_CHAT=false: guests are told to log in, accounts chat normally', async () => {
-  const gw3 = await startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, maxPerIp: 100, metaUrls, guestsCanChat: false });
+  const gw3 = await startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, maxPerIp: 100, metaUrls, guestsCanChat: false, powBits: 0 });
   await sleep(300);
   const guest = client(gw3);
   await guest.ready();
@@ -478,4 +479,26 @@ test('revoked sessions close open sockets elsewhere; mods cannot lift bans', asy
   assert.equal((await adminHttp(gw1, 'lift', { id: ban.body.id }, tok)).status, 403);
   assert.equal((await adminHttp(gw1, 'lift', { id: ban.body.id })).status, 200);
   mod.close();
+});
+
+test('registration proof of work: required, single use, unforgeable', async () => {
+  const gw = await startGateway({ port: 0, host: '127.0.0.1', topology, secret, tokenSecret: 'tok', quiet: true, maxPerIp: 100, metaUrls, registerPerHour: 1000, powBits: 12 });
+  await sleep(300);
+  const c = client(gw);
+  await c.ready();
+  await assert.rejects(c.rpc('auth.register', { name: 'nopow', password: 'password123' }), { code: 'POW' });
+  const ch = await c.rpc('auth.challenge');
+  assert.equal(ch.bits, 12);
+  const nonce = await powSolve(ch.challenge, ch.bits);
+  let bad = 0;
+  while (await powCheck(ch.challenge, bad, ch.bits)) bad++;
+  await assert.rejects(c.rpc('auth.register', { name: 'badpow', password: 'password123', pow: { challenge: ch.challenge, nonce: bad } }), { code: 'POW' });
+  const ok = await c.rpc('auth.register', { name: 'withpow', password: 'password123', pow: { challenge: ch.challenge, nonce } });
+  assert.equal(ok.account.name, 'withpow');
+  await assert.rejects(c.rpc('auth.register', { name: 'reuse', password: 'password123', pow: { challenge: ch.challenge, nonce } }), { code: 'POW' }, 'one use');
+  const [ts, rnd] = ch.challenge.split('.');
+  const forged = `${ts}.${rnd}.AAAAAAAAAAAAAAAA`;
+  await assert.rejects(c.rpc('auth.register', { name: 'forged', password: 'password123', pow: { challenge: forged, nonce: await powSolve(forged, 12) } }), { code: 'POW' });
+  c.close();
+  gw.close();
 });

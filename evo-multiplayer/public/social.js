@@ -3,6 +3,7 @@
 // arrive as {t:'ev'} pushes. All user text is inserted with textContent.
 
 import { hueToRgb, rgbToCss } from '/shared/color.js';
+import { powSolve } from '/shared/pow.js';
 
 export function initSocial(api) {
   // api: { send(obj), relogin(), store, notice(text), nearestOwn(x, y),
@@ -217,7 +218,16 @@ export function initSocial(api) {
       }
     }, false);
     const register = act(async () => {
-      const r = await rpc('auth.register', { name: name.value.trim(), password: pw.value, hue: Number(api.store.get('hue', 0)) / 360 });
+      // Anti-bulk-registration check: a second or two of hashing.
+      let pow;
+      const ch = await rpc('auth.challenge');
+      if (ch.bits > 0) {
+        msg.textContent = '正在进行注册校验（防止批量注册小号），请稍候…';
+        const t0 = performance.now();
+        pow = { challenge: ch.challenge, nonce: await powSolve(ch.challenge, ch.bits) };
+        msg.textContent = `校验完成（${((performance.now() - t0) / 1000).toFixed(1)} 秒）`;
+      }
+      const r = await rpc('auth.register', { name: name.value.trim(), password: pw.value, hue: Number(api.store.get('hue', 0)) / 360, pow });
       holdRender = true;
       body.replaceChildren(
         el('h4', {}, '注册成功！请保存恢复码'),
@@ -291,8 +301,8 @@ export function initSocial(api) {
       releaseItem = null;
       api.setTool('pan');
       rpc('item.release', { item, x, y })
-        .then(() => {
-          toast('已放生');
+        .then((r) => {
+          toast(r && r.uncertain ? '已放生（世界服务器响应较慢，生物可能稍后才出现）' : '已放生');
           if (tab === 'bag') render();
         })
         .catch(fail);

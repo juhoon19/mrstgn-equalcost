@@ -9,6 +9,7 @@
 // MAX_PER_IP raised (all bots share one IP).
 
 import WebSocket from 'ws';
+import { powSolve } from '../src/shared/pow.js';
 
 const args = Object.fromEntries(
   process.argv
@@ -67,7 +68,9 @@ async function bot(i) {
   const url = urls[i % urls.length];
   const name = `${prefix}_${i}`;
   const g = await connect(url, {});
-  let r = await g.rpc('auth.register', { name, password: 'password123' });
+  const ch = await g.rpc('auth.challenge');
+  const pow = ch.ok && ch.r.bits > 0 ? { challenge: ch.r.challenge, nonce: await powSolve(ch.r.challenge, ch.r.bits) } : undefined;
+  let r = await g.rpc('auth.register', { name, password: 'password123', pow });
   if (!r.ok) r = await g.rpc('auth.login', { name, password: 'password123' });
   g.ws.close();
   if (!r.ok) throw new Error(`${name}: ${r.code}`);

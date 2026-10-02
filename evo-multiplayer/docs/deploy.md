@@ -131,6 +131,7 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `ALLOW_DOMAINS` | 聊天和私信里允许出现的链接域名（逗号分隔），其他链接一律拦截 | 空 |
 | `REGISTER_PER_IP_HOUR` | 同一 IP 每小时最多注册几个账号（计数存在数据库里，所有网关和副本共用） | 5 |
 | `MESSAGE_RETENTION_DAYS` | 私信保留天数，过期自动删除（0 = 永久保留） | 365 |
+| `POW_BITS` | 注册工作量证明的难度（每 +1 计算量翻倍；0 = 关闭） | 16 |
 | `GUESTS_CAN_CHAT` | 设成 `false` 后只有登录玩家能聊天（游客仍然能玩） | true |
 
 ## 运维后台与管理
