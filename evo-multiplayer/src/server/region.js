@@ -65,13 +65,6 @@ export class Chunk {
   }
 }
 
-class HashCell {
-  constructor() {
-    this.gen = -1;
-    this.list = [];
-  }
-}
-
 // Small deterministic PRNG (mulberry32) so tests and tuning runs repeat.
 export function makeRng(seed) {
   let a = seed >>> 0;
@@ -116,8 +109,17 @@ export class Region {
 
     this.ghostsFrom = new Map(); // shardId -> Entity[]
     this.ghostEdges = new Map(); // foreign chunkId -> Float32Array(4*G*C)
-    this.hash = new Map();
-    this.hashGen = 0;
+    // Spatial grid (see rebuildHash).
+    this.gridAll = [];
+    this.gridEnts = [];
+    this.gridCell = new Int32Array(0);
+    this.gridGx = new Int32Array(0);
+    this.gridStart = new Int32Array(1);
+    this.gridCursor = new Int32Array(0);
+    this.gridX0 = 0;
+    this.gridY0 = 0;
+    this.gridW = 0;
+    this.gridH = 0;
     this.local = []; // flat list of live local entities, rebuilt each tick
     this.maxEntitiesPerChunk = 400;
     this.fieldEvery = 2;
@@ -132,6 +134,11 @@ export class Region {
   // (incl. diagonally). Recomputed whenever ownership changes.
   recomputeBorders() {
     const topo = this.topo;
+    // Dense id -> owned chunk table for the hot field accessors (a Map lookup
+    // per read was a measurable share of every tick). Every change to the
+    // chunk set ends here.
+    this.chunkById = new Array(topo.chunkCount).fill(null);
+    for (const [id, c] of this.chunks) this.chunkById[id] = c;
     this.borderChunksFor = new Map();
     for (const chunk of this.chunks.values()) {
       const seen = new Set();
@@ -238,61 +245,95 @@ export class Region {
     return n;
   }
 
-  // ------------------------------------------------------------ spatial hash
-
-  hashKey(gx, gy) {
-    return gy * 65536 + gx;
-  }
-
-  hashInsert(e) {
-    const s = this.hashCell;
-    const key = this.hashKey(Math.floor(e.x / s), Math.floor(e.y / s));
-    let cell = this.hash.get(key);
-    if (!cell) {
-      cell = new HashCell();
-      this.hash.set(key, cell);
-    }
-    if (cell.gen !== this.hashGen) {
-      cell.gen = this.hashGen;
-      cell.list.length = 0;
-    }
-    cell.list.push(e);
-  }
+  // ------------------------------------------------------------ spatial grid
+  // Rebuilt every tick: a dense grid over the bounding box of all local and
+  // ghost entities, filled by counting sort (cellStart[c]..cellStart[c+1] index
+  // into gridEnts). Queries are plain array reads - no hash lookups, no
+  // allocation - and each cell keeps insertion order, so iteration order (and
+  // therefore the simulation) is identical to a per-cell list.
 
   rebuildHash() {
-    this.hashGen++;
-    if (this.hash.size > 200000) this.hash.clear();
     const local = this.local;
     local.length = 0;
+    const all = this.gridAll;
+    all.length = 0;
     for (const c of this.chunks.values()) {
       for (const e of c.entities) {
         local.push(e);
-        this.hashInsert(e);
+        all.push(e);
       }
     }
     // Skip ghosts standing in our own chunks: right after a chunk handoff the
     // previous owner's last ghost message can still describe entities that
     // now live here.
     for (const list of this.ghostsFrom.values()) {
-      for (const g of list) if (!this.chunks.has(this.topo.chunkAt(g.x, g.y))) this.hashInsert(g);
+      for (const g of list) if (!this.chunks.has(this.topo.chunkAt(g.x, g.y))) all.push(g);
     }
+    const n = all.length;
+    const s = this.hashCell;
+    if (this.gridCell.length < n) this.gridCell = new Int32Array(Math.max(1024, n * 2));
+    const cellOf = this.gridCell;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    const gxs = this.gridGx.length < n ? (this.gridGx = new Int32Array(Math.max(1024, n * 2))) : this.gridGx;
+    for (let i = 0; i < n; i++) {
+      const e = all[i];
+      const gx = Math.floor(e.x / s);
+      const gy = Math.floor(e.y / s);
+      gxs[i] = gx;
+      cellOf[i] = gy;
+      if (gx < x0) x0 = gx;
+      if (gx > x1) x1 = gx;
+      if (gy < y0) y0 = gy;
+      if (gy > y1) y1 = gy;
+    }
+    if (n === 0) {
+      x0 = y0 = 0;
+      x1 = y1 = -1;
+    }
+    const W = x1 - x0 + 1;
+    const H = y1 - y0 + 1;
+    const cells = Math.max(0, W * H);
+    if (this.gridStart.length < cells + 1) this.gridStart = new Int32Array(Math.max(1024, (cells + 1) * 2));
+    const start = this.gridStart;
+    start.fill(0, 0, cells + 1);
+    for (let i = 0; i < n; i++) {
+      const c = (cellOf[i] - y0) * W + (gxs[i] - x0);
+      cellOf[i] = c;
+      start[c + 1]++;
+    }
+    for (let c = 0; c < cells; c++) start[c + 1] += start[c];
+    // Place in insertion order (cursor = running copy of start).
+    if (this.gridCursor.length < cells) this.gridCursor = new Int32Array(Math.max(1024, cells * 2));
+    const cur = this.gridCursor;
+    cur.set(start.subarray(0, cells));
+    const ents = this.gridEnts;
+    ents.length = n;
+    for (let i = 0; i < n; i++) ents[cur[cellOf[i]]++] = all[i];
+    this.gridX0 = x0;
+    this.gridY0 = y0;
+    this.gridW = W;
+    this.gridH = H;
   }
 
-  // Calls fn(entity) for every local or ghost entity whose hash cell overlaps
+  // Calls fn(entity) for every local or ghost entity whose grid cell overlaps
   // the square of half-size `radius` around (x, y). Distance test is the caller's.
   near(x, y, radius, fn) {
     const s = this.hashCell;
-    const gx0 = Math.floor((x - radius) / s);
-    const gy0 = Math.floor((y - radius) / s);
-    const gx1 = Math.floor((x + radius) / s);
-    const gy1 = Math.floor((y + radius) / s);
-    const gen = this.hashGen;
+    const W = this.gridW;
+    const gx0 = Math.max(this.gridX0, Math.floor((x - radius) / s)) - this.gridX0;
+    const gy0 = Math.max(this.gridY0, Math.floor((y - radius) / s)) - this.gridY0;
+    const gx1 = Math.min(this.gridX0 + W - 1, Math.floor((x + radius) / s)) - this.gridX0;
+    const gy1 = Math.min(this.gridY0 + this.gridH - 1, Math.floor((y + radius) / s)) - this.gridY0;
+    const start = this.gridStart;
+    const ents = this.gridEnts;
     for (let gy = gy0; gy <= gy1; gy++) {
+      const row = gy * W;
       for (let gx = gx0; gx <= gx1; gx++) {
-        const cell = this.hash.get(this.hashKey(gx, gy));
-        if (!cell || cell.gen !== gen) continue;
-        const list = cell.list;
-        for (let i = 0; i < list.length; i++) fn(list[i]);
+        const c = row + gx;
+        for (let i = start[c], end = start[c + 1]; i < end; i++) fn(ents[i]);
       }
     }
   }
@@ -301,20 +342,21 @@ export class Region {
   // than `exclude`. Allocation-free (no callback), for hot sensing loops.
   nearest(x, y, range, exclude, kind) {
     const s = this.hashCell;
-    const gx0 = Math.floor((x - range) / s);
-    const gy0 = Math.floor((y - range) / s);
-    const gx1 = Math.floor((x + range) / s);
-    const gy1 = Math.floor((y + range) / s);
-    const gen = this.hashGen;
+    const W = this.gridW;
+    const gx0 = Math.max(this.gridX0, Math.floor((x - range) / s)) - this.gridX0;
+    const gy0 = Math.max(this.gridY0, Math.floor((y - range) / s)) - this.gridY0;
+    const gx1 = Math.min(this.gridX0 + W - 1, Math.floor((x + range) / s)) - this.gridX0;
+    const gy1 = Math.min(this.gridY0 + this.gridH - 1, Math.floor((y + range) / s)) - this.gridY0;
+    const start = this.gridStart;
+    const ents = this.gridEnts;
     let best = range * range;
     let found = null;
     for (let gy = gy0; gy <= gy1; gy++) {
+      const row = gy * W;
       for (let gx = gx0; gx <= gx1; gx++) {
-        const cell = this.hash.get(gy * 65536 + gx);
-        if (!cell || cell.gen !== gen) continue;
-        const list = cell.list;
-        for (let i = 0; i < list.length; i++) {
-          const o = list[i];
+        const c = row + gx;
+        for (let i = start[c], end = start[c + 1]; i < end; i++) {
+          const o = ents[i];
           if (o === exclude || o.kind !== kind) continue;
           const dx = o.x - x;
           const dy = o.y - y;
@@ -347,7 +389,7 @@ export class Region {
     const lx = gx - cx * G;
     const ly = gy - cy * G;
     const id = cy * this.world.chunksX + cx;
-    const chunk = this.chunks.get(id);
+    const chunk = this.chunkById[id];
     if (chunk) return chunk.field[(ly * G + lx) * this.C + ch];
     const edges = this.ghostEdges.get(id);
     if (!edges) return 0;
@@ -399,7 +441,7 @@ export class Region {
   // amount actually applied (negative amounts cannot drive a cell below 0).
   fieldAdd(x, y, ch, amount) {
     const id = this.topo.chunkAt(x, y);
-    const chunk = this.chunks.get(id);
+    const chunk = id >= 0 ? this.chunkById[id] : null;
     if (!chunk) return 0;
     const G = this.G;
     const h = this.fieldCell;
