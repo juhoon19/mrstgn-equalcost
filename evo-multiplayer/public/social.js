@@ -598,6 +598,10 @@ export function initSocial(api) {
         if (me()) me().mutedUntil = ev.until;
         toast(`你被禁言至 ${new Date(ev.until).toLocaleString()}${ev.reason ? '：' + ev.reason : ''}`, 'bad');
         break;
+      case 'unmuted':
+        if (me()) me().mutedUntil = 0;
+        toast('你的禁言已解除', 'ok');
+        break;
       case 'banned':
         toast('账号已被封禁', 'bad');
         break;

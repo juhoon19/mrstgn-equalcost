@@ -17,6 +17,7 @@ import { newSecret, verifyTotp, otpauthUri } from './totp.js';
 
 const scrypt = promisify(crypto.scrypt);
 const SESSION_MS = 30 * 24 * 3600 * 1000;
+const CACHE_MS = 5000;
 export const STARTER_GRANT = 100;
 export const ROLES = ['player', 'mod', 'admin'];
 
@@ -64,6 +65,19 @@ export class Accounts {
     this.store = store;
     this.log = log;
     this.registerPerHour = registerPerHour;
+    this.cache = new Map(); // id -> { a, t }
+    // Invalidate again once a write has finished (a read racing the write
+    // could otherwise re-cache the old row).
+    for (const m of ['totpSetup', 'totpEnable', 'totpDisable', 'setPrivacy', 'setRole', 'setSanction']) {
+      const f = this[m].bind(this);
+      this[m] = async (id, ...rest) => {
+        try {
+          return await f(id, ...rest);
+        } finally {
+          this.invalidate(id);
+        }
+      };
+    }
     this.pepper = pepper;
   }
 
@@ -189,9 +203,25 @@ export class Accounts {
     return publicAccount(row);
   }
 
+  // Read on almost every request (DMs, presence, staff checks): cached for
+  // CACHE_MS. Changes made through this replica invalidate at once; a change
+  // made on another replica (a mute, a role) applies here within CACHE_MS -
+  // and sanctions are also pushed to the account's home replica, which
+  // invalidates on delivery (see meta-node deliver()).
   async get(id) {
+    const hit = this.cache.get(id);
+    if (hit && Date.now() - hit.t < CACHE_MS) return hit.a;
     const r = await this.store.query('SELECT * FROM accounts WHERE id = $1', [id]);
-    return r.rows[0] ? publicAccount(r.rows[0]) : null;
+    const a = r.rows[0] ? publicAccount(r.rows[0]) : null;
+    if (a) {
+      if (this.cache.size > 100000) this.cache.clear();
+      this.cache.set(id, { a, t: Date.now() });
+    }
+    return a;
+  }
+
+  invalidate(id) {
+    this.cache.delete(Number(id));
   }
 
   async byName(name) {
@@ -252,6 +282,7 @@ export class Accounts {
   }
 
   async totpSetup(accountId) {
+    this.invalidate(accountId);
     const secret = newSecret();
     const a = await this.store.query('SELECT display, totp_enabled FROM accounts WHERE id = $1', [accountId]);
     // Replacing an active secret would switch 2FA off without a code: a stolen
@@ -262,6 +293,7 @@ export class Accounts {
   }
 
   async totpEnable(accountId, code) {
+    this.invalidate(accountId);
     const r = await this.store.query('SELECT * FROM accounts WHERE id = $1', [accountId]);
     const acct = r.rows[0];
     if (!acct?.totp_secret || !(await this.checkTotp(acct, code))) throw new AppError('BAD_TOTP', '验证码错误');
@@ -269,6 +301,7 @@ export class Accounts {
   }
 
   async totpDisable(accountId, code) {
+    this.invalidate(accountId);
     const r = await this.store.query('SELECT * FROM accounts WHERE id = $1', [accountId]);
     const acct = r.rows[0];
     if (!Number(acct?.totp_enabled) || !(await this.checkTotp(acct, code))) throw new AppError('BAD_TOTP', '验证码错误');
@@ -276,16 +309,19 @@ export class Accounts {
   }
 
   async setPrivacy(accountId, dm) {
+    this.invalidate(accountId);
     if (!['everyone', 'friends', 'nobody'].includes(dm)) throw new AppError('BAD_ARG', 'privacy must be everyone|friends|nobody');
     await this.store.query('UPDATE accounts SET privacy_dm = $1 WHERE id = $2', [dm, accountId]);
   }
 
   async setRole(accountId, role) {
+    this.invalidate(accountId);
     if (!ROLES.includes(role)) throw new AppError('BAD_ARG', `role must be one of ${ROLES}`);
     await this.store.query('UPDATE accounts SET role = $1 WHERE id = $2', [role, accountId]);
   }
 
   async setSanction(accountId, { mutedUntil, bannedUntil }) {
+    this.invalidate(accountId);
     if (mutedUntil !== undefined) await this.store.query('UPDATE accounts SET muted_until = $1 WHERE id = $2', [mutedUntil, accountId]);
     if (bannedUntil !== undefined) {
       await this.store.query('UPDATE accounts SET banned_until = $1 WHERE id = $2', [bannedUntil, accountId]);

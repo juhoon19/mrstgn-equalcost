@@ -12,6 +12,7 @@ export const NEW_CONVERSATIONS_PER_HOUR = 10;
 export const FRIEND_REQUESTS_PER_HOUR = 30;
 
 const pair = (x, y) => (x < y ? [x, y] : [y, x]);
+const truthy = (v) => v === true || v === 1 || v === '1' || v === 't';
 const int = (v, name) => {
   const n = Number(v);
   if (!Number.isInteger(n) || n <= 0) throw new AppError('BAD_ARG', `${name} must be a positive integer`);
@@ -138,16 +139,25 @@ export class Social {
   async canMessage(from, to, mutedUntil) {
     if (from === to) throw new AppError('BAD_ARG', '不能给自己发消息');
     if (mutedUntil > Date.now()) throw new AppError('MUTED', `你已被禁言至 ${new Date(mutedUntil).toLocaleString()}`);
-    const r = await this.store.query('SELECT privacy_dm FROM accounts WHERE id = $1', [to]);
+    // Every rule's data in one round trip (this runs for every message).
+    const [x, y] = pair(from, to);
+    const r = await this.store.query(
+      `SELECT a.privacy_dm,
+              EXISTS (SELECT 1 FROM blocks WHERE (account = $1 AND target = $2) OR (account = $2 AND target = $1)) AS blocked,
+              EXISTS (SELECT 1 FROM friends WHERE a = $3 AND b = $4 AND status = 'accepted') AS friends,
+              EXISTS (SELECT 1 FROM messages WHERE from_acct = $1 AND to_acct = $2) AS prior
+         FROM accounts a WHERE a.id = $2`,
+      [from, to, x, y],
+    );
     if (!r.rows.length) throw new AppError('NOT_FOUND', '没有这个玩家');
-    if (await this.isBlocked(from, to)) throw new AppError('BLOCKED', '对方不接收你的消息');
-    const friends = await this.areFriends(from, to);
-    const privacy = r.rows[0].privacy_dm;
+    const row = r.rows[0];
+    if (truthy(row.blocked)) throw new AppError('BLOCKED', '对方不接收你的消息');
+    const friends = truthy(row.friends);
+    const privacy = row.privacy_dm;
     if (privacy === 'nobody' || (privacy === 'friends' && !friends)) throw new AppError('PRIVACY', '对方只接收好友的消息');
     if (!this.rate(this.dmRate, from, 60000, DM_PER_MINUTE)) throw new AppError('RATE', '发送太快了');
     if (!friends) {
-      const prior = await this.store.query('SELECT 1 FROM messages WHERE from_acct = $1 AND to_acct = $2 LIMIT 1', [from, to]);
-      if (!prior.rows.length && !this.rate(this.newConv, from, 3600000, NEW_CONVERSATIONS_PER_HOUR)) {
+      if (!truthy(row.prior) && !this.rate(this.newConv, from, 3600000, NEW_CONVERSATIONS_PER_HOUR)) {
         throw new AppError('RATE', '每小时最多主动联系 10 位陌生人');
       }
     }

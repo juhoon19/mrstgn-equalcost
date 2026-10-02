@@ -32,17 +32,58 @@ export class MetaClient {
             } catch {
               return;
             }
-            if (msg.t === 'rpcr') {
-              const p = this.pending.get(msg.id);
-              if (!p) return;
-              this.pending.delete(msg.id);
-              clearTimeout(p.timer);
-              if (msg.ok) p.resolve(msg.r);
-              else p.reject(new MetaError(msg.code, msg.msg));
-            } else if (msg.t === 'push') onPush(msg.conn, msg.ev, i);
+            if (Array.isArray(msg)) for (const m of msg) this.onOne(m, i);
+            else this.onOne(msg, i);
           },
         }),
     );
+    this.onPush = onPush;
+    // Outgoing messages per replica, flushed once per event-loop turn as one
+    // frame (order kept). Index i -> [msg].
+    this.outQ = urls.map(() => []);
+    this.outScheduled = false;
+  }
+
+  onOne(msg, i) {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.t === 'rpcr') {
+      const p = this.pending.get(msg.id);
+      if (!p) return;
+      this.pending.delete(msg.id);
+      clearTimeout(p.timer);
+      if (msg.ok) p.resolve(msg.r);
+      else p.reject(new MetaError(msg.code, msg.msg));
+    } else if (msg.t === 'push') this.onPush(msg.conn, msg.ev, i);
+  }
+
+  queue(i, msg) {
+    if (!this.links[i].open) return false;
+    this.outQ[i].push(msg);
+    if (!this.outScheduled) {
+      this.outScheduled = true;
+      setImmediate(() => this.flush());
+    }
+    return true;
+  }
+
+  flush() {
+    this.outScheduled = false;
+    for (let i = 0; i < this.outQ.length; i++) {
+      const q = this.outQ[i];
+      if (!q.length) continue;
+      this.outQ[i] = [];
+      if (!this.links[i].send(JSON.stringify(q.length === 1 ? q[0] : q))) {
+        // The link dropped in between: fail those calls now, not at timeout.
+        for (const m of q) {
+          const p = m.t === 'rpc' && this.pending.get(m.id);
+          if (p) {
+            this.pending.delete(m.id);
+            clearTimeout(p.timer);
+            p.reject(new MetaError('META_DOWN', '账号服务暂时不可用'));
+          }
+        }
+      }
+    }
   }
 
   get size() {
@@ -80,9 +121,7 @@ export class MetaClient {
         reject(new MetaError('TIMEOUT', '账号服务超时'));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      const ok = this.links[i].send(
-        JSON.stringify({ t: 'rpc', id, m, a, acct: ctx.acct || 0, ip: ctx.ip || '', ua: ctx.ua || '', superuser: !!ctx.superuser }),
-      );
+      const ok = this.queue(i, { t: 'rpc', id, m, a, acct: ctx.acct || 0, ip: ctx.ip || '', ua: ctx.ua || '', superuser: !!ctx.superuser });
       if (!ok) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -93,8 +132,7 @@ export class MetaClient {
 
   // Fire-and-forget to a replica (presence, rewards).
   send(replica, msg) {
-    const l = this.links[replica];
-    return l ? l.send(JSON.stringify(msg)) : false;
+    return this.links[replica] ? this.queue(replica, msg) : false;
   }
 
   close() {

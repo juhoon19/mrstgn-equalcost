@@ -170,8 +170,31 @@ export async function startMeta(opts = {}) {
   const gwIds = new Map();
   const gwOf = (ws) => gwIds.get(ws) ?? '?';
 
+  // Replies and pushes produced in the same event-loop turn go to a gateway
+  // as one frame (one syscall) instead of one each: under load most of this
+  // process's CPU was spent in socket writes. Order per socket is kept.
+  const outQ = new Map(); // ws -> [msg]
+  let outScheduled = false;
+  function sendBatched(ws, msg) {
+    let q = outQ.get(ws);
+    if (!q) outQ.set(ws, (q = []));
+    q.push(msg);
+    if (!outScheduled) {
+      outScheduled = true;
+      setImmediate(flushOut);
+    }
+  }
+  function flushOut() {
+    outScheduled = false;
+    for (const [ws, q] of outQ) if (ws.readyState === 1) ws.send(JSON.stringify(q.length === 1 ? q[0] : q));
+    outQ.clear();
+  }
+
   // Deliver a live event to every session of `acct` (wherever it is).
   function deliver(acct, ev) {
+    // A sanction set on another replica: the home replica must not keep
+    // serving the cached (unmuted) account.
+    if (ev.type === 'muted' || ev.type === 'banned' || ev.type === 'unmuted') accounts.invalidate(acct);
     const h = home(acct);
     if (h !== id) {
       peers.get(h)?.send(JSON.stringify({ t: 'deliver', acct, ev }));
@@ -179,7 +202,7 @@ export async function startMeta(opts = {}) {
     }
     for (const key of conns.get(acct) || []) {
       const s = connSock.get(key);
-      if (s && s.ws.readyState === 1) s.ws.send(JSON.stringify({ t: 'push', conn: s.conn, ev }));
+      if (s && s.ws.readyState === 1) sendBatched(s.ws, { t: 'push', conn: s.conn, ev });
     }
   }
 
@@ -229,6 +252,7 @@ export async function startMeta(opts = {}) {
     'auth.login': (a, x) => accounts.login({ name: a.name, password: a.password, totp: a.totp, ua: x.ua, ip: x.ip }),
     'auth.recover': async (a, x) => {
       const r = await accounts.recover({ name: a.name, code: a.code, newPassword: a.newPassword, ua: x.ua, ip: x.ip });
+      accounts.invalidate(r.account.id);
       sessionsChanged(r.account.id);
       return r;
     },
@@ -335,6 +359,7 @@ export async function startMeta(opts = {}) {
       await accounts.setSanction(target, s);
       await social.audit(who.id, 'sanction', `acct:${target}`, { ...s, reason: a.reason || '' });
       if (s.mutedUntil) deliver(target, { type: 'muted', until: s.mutedUntil, reason: a.reason || '' });
+      else if (s.mutedUntil === 0) deliver(target, { type: 'unmuted' });
       if (s.bannedUntil) deliver(target, { type: 'banned', until: s.bannedUntil });
       return s;
     },
@@ -359,7 +384,7 @@ export async function startMeta(opts = {}) {
 
   async function handleRpc(ws, msg) {
     const reply = (body) => {
-      if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'rpcr', id: msg.id, ...body }));
+      sendBatched(ws, { t: 'rpcr', id: msg.id, ...body });
     };
     const fn = methods[msg.m];
     if (!fn) return reply({ ok: false, code: 'NO_METHOD', msg: `unknown method ${msg.m}` });
@@ -418,14 +443,9 @@ export async function startMeta(opts = {}) {
   const wss = new WebSocketServer({ server, perMessageDeflate: false, maxPayload: 4 * 1024 * 1024 });
   wss.on('connection', (ws) => {
     let role = null;
-    ws.on('message', (data, isBinary) => {
-      if (isBinary) return;
-      let msg;
-      try {
-        msg = JSON.parse(data.toString());
-      } catch {
-        return;
-      }
+    // A frame carries one message or an array of them (see sendBatched).
+    const onMsg = (msg) => {
+      if (!msg || typeof msg !== 'object') return;
       if (role === null) {
         if (msg.t !== 'hello' || msg.secret !== secret) return ws.close(1008, 'bad hello');
         role = msg.role;
@@ -447,6 +467,18 @@ export async function startMeta(opts = {}) {
           economy.reward(msg.entries || [], msg.key, { period: String(msg.period || msg.key), cap: rewardCap }).catch((err) => log('reward failed', err.message));
         }
       }
+    };
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return;
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (Array.isArray(msg)) {
+        if (role !== null) for (const m of msg) onMsg(m);
+      } else onMsg(msg);
     });
     ws.on('close', () => {
       if (role === 'gateway') {

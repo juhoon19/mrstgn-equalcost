@@ -309,6 +309,7 @@ export async function startGateway(opts = {}) {
         const c = conns.get(conn);
         if (!c || !ev) return;
         if (ev.type === 'muted') c.mutedUntil = Number(ev.until) || 0;
+        else if (ev.type === 'unmuted') c.mutedUntil = 0;
         if (ev.type === 'sessions-changed') {
           // Only close connections whose own session no longer exists.
           meta
