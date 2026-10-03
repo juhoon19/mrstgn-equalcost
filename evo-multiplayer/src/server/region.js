@@ -645,8 +645,23 @@ export class Region {
   }
 
   // Accepts entities migrated in from another shard.
+  // After a crash restore (ours or a neighbour's) the same organism can
+  // exist twice: the live copy and the one brought back from an older
+  // snapshot. While `dedupeUntil` (ms) is in the future, an arriving entity
+  // whose id we already hold keeps only the copy with the larger age - the
+  // live one kept aging, the restored one went back to its snapshot age.
   adopt(entities) {
+    const index = this.dedupeUntil > Date.now() ? this.localIndex() : null;
     for (const e of entities) {
+      if (index) {
+        const old = index.get(e.id);
+        if (old && !old.dead) {
+          this.dupesRemoved = (this.dupesRemoved || 0) + 1;
+          if ((old.age || 0) >= (e.age || 0)) continue; // ours is the live copy
+          this.removeEntity(old);
+        }
+        index.set(e.id, e);
+      }
       const id = this.topo.chunkAt(e.x, e.y);
       const chunk = this.chunks.get(id);
       if (!chunk) {
@@ -658,6 +673,35 @@ export class Region {
       e.chunk = id;
       chunk.entities.push(e);
     }
+  }
+
+  localIndex() {
+    const m = new Map();
+    for (const c of this.chunks.values()) for (const e of c.entities) m.set(e.id, e);
+    return m;
+  }
+
+  // Takes an entity out of its chunk now (no corpse, no effects).
+  removeEntity(e) {
+    const c = this.chunks.get(e.chunk);
+    if (c) {
+      const i = c.entities.indexOf(e);
+      if (i >= 0) c.entities.splice(i, 1);
+    }
+    e.dead = true;
+  }
+
+  // Removes the given ids (stale restored copies a neighbour holds live).
+  dropIds(ids) {
+    let n = 0;
+    for (const c of this.chunks.values()) {
+      const keep = c.entities.filter((e) => !ids.has(e.id));
+      n += c.entities.length - keep.length;
+      for (const e of c.entities) if (ids.has(e.id)) e.dead = true;
+      c.entities = keep;
+    }
+    this.dupesRemoved = (this.dupesRemoved || 0) + n;
+    return n;
   }
 
   // ---------------------------------------------------------- serialisation

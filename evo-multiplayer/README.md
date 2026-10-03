@@ -104,11 +104,12 @@ docs/           架构、协议、接入指南、部署、参考、压测
 ## 常用命令
 
 ```bash
-npm test                                             # 53 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁、跨区切换、账号/交易/社交
+npm test                                             # 54 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁、跨区切换、账号/交易/社交
 TEST_DATABASE_URL=postgres://… npm run test:pg          # 账号/经济测试在 PostgreSQL 上再跑一遍（会清空该库）；GitHub Actions 每次推送自动跑这两项 + Docker 构建
 node bench/headless.js --shards 4 --world 16x16      # 不开网络，看生态/性能
 node bench/bots.js --url ws://localhost:8080/ws --n 500 --duration 60   # 压测
 node bench/meta-load.js --url ws://localhost:8080/ws --clients 500   # 账号/社交层压测（需调高 REGISTER_PER_IP_HOUR、MAX_PER_IP）
+node bench/soak.js --url ws://localhost:8080/ws --n 1000 --seconds 180 --admin-token … --db postgres://…   # 1000 个不同行为玩家的混沌测试 + 全量不变量检查（见 benchmarks.md §10）
 curl localhost:8080/metrics                          # 网关指标
 curl localhost:9100/metrics                          # 分片指标（内网）
 ```

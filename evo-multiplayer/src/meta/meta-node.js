@@ -125,7 +125,7 @@ export async function startMeta(opts = {}) {
   }
 
   async function setOnline(acct, on) {
-    if (on === online.has(acct)) return;
+    if (closing || on === online.has(acct)) return;
     if (on) online.add(acct);
     else online.delete(acct);
     broadcastPeers({ t: 'presence', accts: [acct], online: on });
@@ -237,6 +237,7 @@ export async function startMeta(opts = {}) {
   async function dmSend(acct, to, text) {
     const me = await accounts.get(acct);
     to = Number(to);
+    if (!Number.isSafeInteger(to) || to <= 0) throw new AppError('BAD_ARG', '收信人无效');
     const { friends } = await social.canMessage(acct, to, me.mutedUntil);
     const mod = moderator.check(String(text ?? '').slice(0, 500), { account: acct, channel: 'dm', toFriend: friends });
     if (!mod.ok) throw new AppError('MODERATED', `消息未发送（${mod.reasons.join('、')}）`);
@@ -382,7 +383,18 @@ export async function startMeta(opts = {}) {
     },
   };
 
+  let closing = false;
+  let inflight = 0;
   async function handleRpc(ws, msg) {
+    if (closing) return;
+    inflight++;
+    try {
+      await handleRpcInner(ws, msg);
+    } finally {
+      inflight--;
+    }
+  }
+  async function handleRpcInner(ws, msg) {
     const reply = (body) => {
       sendBatched(ws, { t: 'rpcr', id: msg.id, ...body });
     };
@@ -393,7 +405,13 @@ export async function startMeta(opts = {}) {
       reply({ ok: true, r: r ?? null });
     } catch (err) {
       if (err instanceof AppError) reply({ ok: false, code: err.code, msg: err.message });
-      else {
+      else if (/^22/.test(String(err.code || ''))) {
+        // Postgres "data exception" (bad number, out of range...): the
+        // client sent garbage that slipped past validation - its fault, not
+        // a server error.
+        log(`rpc ${msg.m}: rejected bad input (${err.message})`);
+        reply({ ok: false, code: 'BAD_ARG', msg: '参数无效' });
+      } else {
         log(`rpc ${msg.m} failed:`, err.message);
         reply({ ok: false, code: 'INTERNAL', msg: '服务器错误' });
       }
@@ -463,7 +481,7 @@ export async function startMeta(opts = {}) {
         if (msg.t === 'deliver') deliver(Number(msg.acct), msg.ev);
         else if (msg.t === 'presence') for (const a of msg.accts) msg.online ? online.add(a) : online.delete(a);
       } else if (role === 'shard') {
-        if (msg.t === 'reward' && typeof msg.key === 'string') {
+        if (msg.t === 'reward' && typeof msg.key === 'string' && !closing) {
           economy.reward(msg.entries || [], msg.key, { period: String(msg.period || msg.key), cap: rewardCap }).catch((err) => log('reward failed', err.message));
         }
       }
@@ -500,12 +518,17 @@ export async function startMeta(opts = {}) {
     social,
     online,
     housekeep,
+    // Stop taking work, let what is running finish, then close the DB (the
+    // other way round, every disconnect during shutdown hit a closed pool).
     async close() {
+      closing = true;
       clearInterval(housekeepTimer);
       for (const l of peers.values()) l.close();
       for (const ws of wss.clients) ws.terminate();
       wss.close();
       server.close();
+      const t = Date.now();
+      while (inflight > 0 && Date.now() - t < 5000) await new Promise((r) => setTimeout(r, 20));
       if (!opts.store) await store.close();
     },
   };

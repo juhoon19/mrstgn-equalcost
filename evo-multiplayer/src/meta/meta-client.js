@@ -24,6 +24,9 @@ export class MetaClient {
         new Link(url, hello, {
           log,
           onOpen: () => onOpen(i),
+          // The replica went away: its unanswered calls can never be
+          // answered - fail them now instead of after the timeout.
+          onClose: () => this.failReplica(i),
           onMessage: (data, isBinary) => {
             if (isBinary) return;
             let msg;
@@ -54,6 +57,15 @@ export class MetaClient {
       if (msg.ok) p.resolve(msg.r);
       else p.reject(new MetaError(msg.code, msg.msg));
     } else if (msg.t === 'push') this.onPush(msg.conn, msg.ev, i);
+  }
+
+  failReplica(i) {
+    for (const [id, p] of this.pending) {
+      if (p.replica !== i) continue;
+      this.pending.delete(id);
+      clearTimeout(p.timer);
+      p.reject(new MetaError('META_DOWN', '账号服务暂时不可用'));
+    }
   }
 
   queue(i, msg) {
@@ -120,7 +132,7 @@ export class MetaClient {
         this.pending.delete(id);
         reject(new MetaError('TIMEOUT', '账号服务超时'));
       }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, replica: i });
       const ok = this.queue(i, { t: 'rpc', id, m, a, acct: ctx.acct || 0, ip: ctx.ip || '', ua: ctx.ua || '', superuser: !!ctx.superuser });
       if (!ok) {
         clearTimeout(timer);

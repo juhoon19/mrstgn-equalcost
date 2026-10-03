@@ -429,7 +429,10 @@ export async function startShard(opts = {}) {
           if (isBinary) return;
           try {
             const msg = JSON.parse(data.toString());
-            if (msg.t === 'mack') inflight.delete(msg.seq);
+            if (msg.t === 'idhave') {
+              const removed = region.dropIds(new Set(msg.ids || []));
+              if (removed) log(`removed ${removed} restored organism(s) that already live on shard ${n}`);
+            } else if (msg.t === 'mack') inflight.delete(msg.seq);
             else if (msg.t === 'xack') xferOut.delete(msg.seq);
             else if (n === 0) onCoordinatorMessage(msg);
           } catch (err) {
@@ -480,10 +483,37 @@ export async function startShard(opts = {}) {
     };
   }
 
+  let restoredIds = null;
+  let restoredAt = 0;
+  const idChecked = new Set();
+  // Called every tick until every neighbour has been asked (or 30 s passed).
+  function sendIdChecks() {
+    if (!restoredIds) return;
+    if (Date.now() - restoredAt > 30000) {
+      restoredIds = null;
+      return;
+    }
+    for (const n of region.neighbours) {
+      if (idChecked.has(n)) continue;
+      const l = peer(n);
+      if (l.open && l.send(JSON.stringify({ t: 'idcheck', ids: restoredIds }))) idChecked.add(n);
+    }
+    if (region.neighbours.every((n) => idChecked.has(n))) restoredIds = null;
+  }
+
   function bootRegion() {
     const ids = topo.chunksOf(shardId);
     region.chunks = new Map(ids.map((id) => [id, region.makeChunk(id)]));
     const missing = snap ? region.applySnapshot(snap, ids) : ids;
+    if (snap && missing.length < ids.length) {
+      // Restored from a snapshot that may be older than the crash: find out
+      // which organisms already live elsewhere (see idcheck), and dedupe
+      // arrivals meanwhile.
+      restoredIds = [];
+      for (const c of region.chunks.values()) for (const e of c.entities) restoredIds.push(e.id);
+      restoredAt = Date.now();
+      region.dedupeUntil = Date.now() + 60000;
+    }
     region.initChunks(missing);
     region.recomputeBorders();
     snap = null; // free memory; later claims only need liveness
@@ -607,6 +637,17 @@ export async function startShard(opts = {}) {
       : null;
 
   function onShardJson(peerShard, ws, msg) {
+    if (msg.t === 'idcheck') {
+      // A neighbour came back from a snapshot and asks which of its restored
+      // organisms we hold: ours are the live copies. Meanwhile its stale
+      // copies may still migrate here - dedupe arrivals for a while.
+      region.dedupeUntil = Date.now() + 60000;
+      const want = new Set(msg.ids || []);
+      const have = [];
+      for (const c of region.chunks.values()) for (const e of c.entities) if (want.has(e.id)) have.push(e.id);
+      if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'idhave', ids: have }));
+      return;
+    }
     if (!coordinator) return;
     if (msg.t === 'chatlog') {
       control.noteChat(msg);
@@ -840,6 +881,7 @@ export async function startShard(opts = {}) {
   }
 
   function tick() {
+    sendIdChecks();
     const t0 = performance.now();
     const emigrants = region.step(dt);
 
