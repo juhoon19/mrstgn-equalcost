@@ -14,7 +14,7 @@ import { Reader } from '../shared/codec.js';
 import { I_ACTIONS, I_CURSORS, I_MIGRATE, I_GHOST, I_XFER, I_SUMMARY, EV_ACTION, EV_CHAT, packBatch } from '../shared/protocol.js';
 import { Writer } from '../shared/codec.js';
 import { Region } from './region.js';
-import { Link, readClusterConfig } from './link.js';
+import { Link, readClusterConfig, assertClusterSecret, secretEqual } from './link.js';
 import { encodeChunkFrame, encodeField, encodeEvents } from './snapshot.js';
 import { loadGame } from './game-loader.js';
 import { Coordinator } from './coordinator.js';
@@ -806,7 +806,7 @@ export async function startShard(opts = {}) {
       try {
         if (role === null) {
           const hello = JSON.parse(data.toString());
-          if (hello.t !== 'hello' || hello.secret !== secret) {
+          if (hello.t !== 'hello' || !secretEqual(hello.secret, secret)) {
             ws.close(1008, 'bad hello');
             return;
           }
@@ -848,6 +848,7 @@ export async function startShard(opts = {}) {
     ws.on('error', () => {});
   });
 
+  assertClusterSecret({ host, secret, role: `shard ${shardId}` });
   await new Promise((resolve) => server.listen(port, host, resolve));
   log(`listening on ${host}:${port}`);
 

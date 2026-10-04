@@ -48,7 +48,7 @@ import {
   peekChunkHeader,
 } from '../shared/protocol.js';
 import { hueToRgb } from '../shared/color.js';
-import { Link, readClusterConfig } from './link.js';
+import { Link, readClusterConfig, assertClusterSecret } from './link.js';
 import { MetaClient, MetaError } from '../meta/meta-client.js';
 import { CLIENT_METHODS, ADMIN_METHODS, GUEST_PID_MIN } from '../meta/methods.js';
 import { Moderator } from '../meta/moderation.js';
@@ -70,7 +70,7 @@ const MIME = {
 
 function cleanText(s, max) {
   return String(s ?? '')
-    .replace(/[\u0000-\u001f\u007f​-‏‪-‮⁦-⁩]/g, '')
+    .replace(/[\u0000-\u001f\u007f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
     .trim()
     .slice(0, max);
 }
@@ -158,7 +158,14 @@ export async function startGateway(opts = {}) {
   const clients = new Set();
   const players = new Map(); // pid -> client (this gateway only)
   const perIp = new Map();
-  const counters = { bytesIn: 0, bytesOut: 0, msgsOut: 0, framesIn: 0, resyncs: 0, dropped: 0, actions: 0 };
+  const counters = { bytesIn: 0, bytesOut: 0, msgsOut: 0, framesIn: 0, resyncs: 0, dropped: 0, actions: 0, subThrottled: 0 };
+  // New chunk subscriptions a client may open: burst SUB_BURST, then ~80/s
+  // sustained (SUB_REFILL per 50 ms tick). A legit zoom-out wants <=80 chunks
+  // at once (fits the burst) and panning adds a handful per second; a client
+  // cycling its view to make the gateway pull in the whole world is capped,
+  // bounding warm-but-unwatched streams to about SUB_RATE * the 5 s keep-warm.
+  const SUB_BURST = Number(opts.subBurst ?? cfg.get('sub-burst', 'SUB_BURST', 160));
+  const SUB_REFILL = Number(opts.subRefill ?? cfg.get('sub-refill', 'SUB_REFILL', 4));
 
   topoCfg.shards.forEach((url, i) => {
     const link = new Link(
@@ -436,9 +443,14 @@ export async function startGateway(opts = {}) {
     const age = Date.now() - Number(ts);
     if (!(age >= 0 && age < 10 * 60000)) return false;
     if (powUsed.has(pow.challenge)) return false;
-    if (!(await powCheck(pow.challenge, Number(pow.nonce), powBits))) return false;
+    // Reserve the challenge now (before the await) so two concurrent
+    // registrations can't both pass with the same solution.
     powUsed.set(pow.challenge, Number(ts) + 10 * 60000);
     if (powUsed.size > 50000) for (const [k, exp] of powUsed) if (exp < Date.now()) powUsed.delete(k);
+    if (!(await powCheck(pow.challenge, Number(pow.nonce), powBits))) {
+      powUsed.delete(pow.challenge); // wrong solution: let them retry this challenge
+      return false;
+    }
     return true;
   }
   const registrations = new Map(); // ip -> [t]
@@ -509,6 +521,11 @@ export async function startGateway(opts = {}) {
     });
   }
   const adminFails = new Map(); // ip -> { n, t }
+  function noteAdminFail(ip) {
+    const f = adminFails.get(ip);
+    adminFails.set(ip, { n: (f && Date.now() - f.t < 60000 ? f.n : 0) + 1, t: Date.now() });
+    if (adminFails.size > 10000) for (const [k, v] of adminFails) if (Date.now() - v.t > 60000) adminFails.delete(k);
+  }
   const staffCache = new Map(); // session token -> { who, t }
   const ROLE_RANK = { player: 0, mod: 1, admin: 2 };
   // Who is calling: ADMIN_TOKEN (superuser), or a staff account's session
@@ -518,8 +535,7 @@ export async function startGateway(opts = {}) {
     if (f && f.n >= 10 && Date.now() - f.t < 60000) return null; // slow down guessing
     const got = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const fail = () => {
-      adminFails.set(ip, { n: (f && Date.now() - f.t < 60000 ? f.n : 0) + 1, t: Date.now() });
-      if (adminFails.size > 10000) for (const [k, v] of adminFails) if (Date.now() - v.t > 60000) adminFails.delete(k);
+      noteAdminFail(ip);
       return null;
     };
     if (!got) return fail();
@@ -553,14 +569,24 @@ export async function startGateway(opts = {}) {
         body += d;
         if (body.length > 4096) req.destroy();
       });
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        resolve(v);
+      };
       req.on('end', () => {
         try {
-          resolve(body ? JSON.parse(body) : {});
+          finish(body ? JSON.parse(body) : {});
         } catch {
-          resolve(null);
+          finish(null);
         }
       });
-      req.on('error', () => resolve(null));
+      // 'close'/'aborted' cover a destroyed (oversized) or dropped request,
+      // where 'end' never fires - otherwise the handler would hang forever.
+      req.on('aborted', () => finish(null));
+      req.on('close', () => finish(null));
+      req.on('error', () => finish(null));
     });
   }
   async function handleAdminHttp(req, res, url) {
@@ -584,10 +610,12 @@ export async function startGateway(opts = {}) {
         const r = await meta.call('auth.login', { name: body.name, password: body.password, totp: body.totp }, { key: String(body.name ?? '').toLowerCase(), ip, ua: 'admin' });
         if (!(ROLE_RANK[r.account.role] >= 1)) {
           meta.call('auth.logout', { token: r.token }, { acct: r.account.id }).catch(() => {});
+          noteAdminFail(ip);
           return json(403, { error: '这个账号不是管理人员' });
         }
         return json(200, { token: r.token, account: r.account });
       } catch (err) {
+        noteAdminFail(ip);
         return json(401, { error: err.message, code: err.code });
       }
     }
@@ -841,7 +869,25 @@ export async function startGateway(opts = {}) {
     const want = topo.viewChunks(x0, y0, x1, y1, viewMargin, tier ? maxChunksLo : maxChunks);
     const wantSet = new Set((want || []).map((id) => skey(id, tier)));
     for (const k of [...c.chunks.keys()]) if (!wantSet.has(k)) unsubscribe(c, k);
-    for (const k of wantSet) if (!c.chunks.has(k)) subscribe(c, k);
+    // Subscription-churn budget: each new chunk subscription spends a token
+    // (refilled in the flush timer). Normal panning adds a few chunks per
+    // view; a client sweeping C_VIEW across the whole world to force the
+    // gateway to pull in every chunk runs out of budget. If throttled,
+    // re-arm so a legitimate teleport still fills in as tokens refill.
+    let throttled = false;
+    for (const k of wantSet) {
+      if (c.chunks.has(k)) continue;
+      if (c.subTokens < 1) {
+        throttled = true;
+        break;
+      }
+      c.subTokens--;
+      subscribe(c, k);
+    }
+    if (throttled) {
+      c.pendingView = { rect, tier };
+      counters.subThrottled++;
+    }
   }
 
   // ------------------------------------------------------------- clients
@@ -1112,18 +1158,32 @@ export async function startGateway(opts = {}) {
   // proxy overwrites (e.g. cf-connecting-ip for Cloudflare); otherwise take
   // X-Forwarded-For counted from the RIGHT: proxies append, so the left end
   // is whatever the client typed and must not be trusted.
+  // One host owns a whole IPv6 /64, so per-IP limits bucket IPv6 to its /64
+  // (otherwise a single machine has effectively unlimited addresses). IPv4 and
+  // v4-mapped addresses are used as-is.
+  function ipBucket(ip) {
+    if (typeof ip !== 'string' || !ip) return '?';
+    const m = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+    if (m) return m[1];
+    if (!ip.includes(':')) return ip;
+    return ip.split(':').slice(0, 4).join(':') + '::/64';
+  }
   function clientIp(req) {
     const peer = req.socket.remoteAddress || '?';
-    if (!trustProxy) return peer;
-    if (ipHeader) {
-      const v = req.headers[ipHeader];
-      return (typeof v === 'string' && v.trim()) || peer;
+    let ip = peer;
+    if (trustProxy) {
+      if (ipHeader) {
+        const v = req.headers[ipHeader];
+        ip = (typeof v === 'string' && v.trim()) || peer;
+      } else {
+        const parts = String(req.headers['x-forwarded-for'] || '')
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean);
+        ip = parts.length >= proxyHops ? parts[parts.length - proxyHops] : peer;
+      }
     }
-    const parts = String(req.headers['x-forwarded-for'] || '')
-      .split(',')
-      .map((x) => x.trim())
-      .filter(Boolean);
-    return parts.length >= proxyHops ? parts[parts.length - proxyHops] : peer;
+    return ipBucket(ip);
   }
 
   function onConnection(ws, ip, ua = '') {
@@ -1155,6 +1215,7 @@ export async function startGateway(opts = {}) {
       replayTokens: REPLAY_BURST,
       alive: true,
       tokens: 200,
+      subTokens: SUB_BURST,
       strikes: 0,
       bytesOut: 0,
       queue: [],
@@ -1208,6 +1269,7 @@ export async function startGateway(opts = {}) {
   const flushTimer = setInterval(() => {
     for (const c of clients) {
       c.tokens = Math.min(200, c.tokens + 5);
+      c.subTokens = Math.min(SUB_BURST, c.subTokens + SUB_REFILL);
       c.rpcTokens = Math.min(20, c.rpcTokens + 0.25); // 5 calls/s sustained
       c.replayTokens = Math.min(REPLAY_BURST, c.replayTokens + REPLAY_RATE / 20);
       if (c.pendingView && Date.now() - c.lastViewAt >= 100) applyView(c, Date.now());
@@ -1394,10 +1456,12 @@ export async function startGateway(opts = {}) {
       accounts: [...clients].filter((c) => c.acct).length,
       resyncs: counters.resyncs,
       dropped: counters.dropped,
+      subThrottled: counters.subThrottled,
       ...rates,
     };
   }
 
+  assertClusterSecret({ host, secret, role: `gateway ${gwId}` });
   await new Promise((resolve) => server.listen(port, host, resolve));
   log(`listening on http://${host}:${port}  (${clients.size} clients)`);
 

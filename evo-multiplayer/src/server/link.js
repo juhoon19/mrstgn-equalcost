@@ -5,6 +5,37 @@
 // in the hello message is a guard against mistakes, not a security boundary.
 
 import WebSocket from 'ws';
+import crypto from 'node:crypto';
+
+export const DEV_SECRET = 'dev-cluster-secret';
+
+// Constant-time secret comparison for the internal hello (avoids leaking the
+// secret length / prefix through response timing on an exposed port).
+export function secretEqual(a, b) {
+  const x = Buffer.from(String(a ?? ''));
+  const y = Buffer.from(String(b ?? ''));
+  if (x.length !== y.length) return false;
+  return crypto.timingSafeEqual(x, y);
+}
+
+const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
+
+// Refuse to listen on a public interface while still using the built-in dev
+// secret: that combination lets anyone who reaches an internal port act as a
+// trusted gateway/shard (mint coins, ban players, move chunks). A clear
+// startup error beats a silent full compromise. Loopback-only is fine for
+// local dev; ALLOW_DEV_SECRET=1 is the explicit escape hatch.
+export function assertClusterSecret({ host, secret, role = 'node' }) {
+  if (secret !== DEV_SECRET) return;
+  if (process.env.ALLOW_DEV_SECRET === '1') return;
+  if (LOOPBACK.has(String(host))) return;
+  throw new Error(
+    `[${role}] refusing to listen on ${host} with the built-in dev cluster secret. ` +
+      'Set CLUSTER_SECRET to a random value (e.g. `openssl rand -hex 16`) on every ' +
+      'shard, gateway and meta process, or bind to 127.0.0.1. ' +
+      '(ALLOW_DEV_SECRET=1 overrides, for trusted private networks only.)',
+  );
+}
 
 export class Link {
   constructor(url, hello, { onOpen, onMessage, onClose, log = () => {} } = {}) {

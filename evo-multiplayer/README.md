@@ -104,7 +104,7 @@ docs/           架构、协议、接入指南、部署、参考、压测
 ## 常用命令
 
 ```bash
-npm test                                             # 54 个测试：真实网络端到端、实时搬区块、整集群重启、跨网关封禁、跨区切换、账号/交易/社交
+npm test                                             # 60 个测试：端到端、实时搬区块、整集群重启、崩溃去重、账号/交易/社交、安全加固回归
 TEST_DATABASE_URL=postgres://… npm run test:pg          # 账号/经济测试在 PostgreSQL 上再跑一遍（会清空该库）；GitHub Actions 每次推送自动跑这两项 + Docker 构建
 node bench/headless.js --shards 4 --world 16x16      # 不开网络，看生态/性能
 node bench/bots.js --url ws://localhost:8080/ws --n 500 --duration 60   # 压测

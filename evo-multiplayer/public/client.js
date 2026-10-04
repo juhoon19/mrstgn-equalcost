@@ -111,13 +111,27 @@ function wsUrl() {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 }
 
-function helloMessage() {
+// Credentials (the login session and the signed identity token) are only
+// ever sent to the same origin that served this page. Otherwise a crafted
+// link (?server=wss://evil/ws) or a zone URL from a hostile server would
+// receive the player's session and take over the account. A cross-origin
+// server still gets a credential-free guest connection.
+function sameOrigin(url) {
+  try {
+    return new URL(url, location.href).host === location.host;
+  } catch {
+    return false;
+  }
+}
+
+function helloMessage(url) {
+  const creds = sameOrigin(url);
   return JSON.stringify({
     t: 'hello',
     name: store.get('name', ''),
     hue: Number(store.get('hue', 0)) / 360,
-    token: store.get('token', ''),
-    session: store.get('session', ''),
+    token: creds ? store.get('token', '') : '',
+    session: creds ? store.get('session', '') : '',
   });
 }
 
@@ -126,7 +140,7 @@ function connect(url = currentZoneUrl() || wsUrl()) {
   const sock = new WebSocket(url);
   ws = sock;
   sock.binaryType = 'arraybuffer';
-  sock.onopen = () => sock.send(helloMessage());
+  sock.onopen = () => sock.send(helloMessage(url));
   sock.onmessage = (ev) => onMessage(ev.data);
   sock.onclose = (ev) => onActiveClose(sock, ev);
   sock.onerror = () => {};
@@ -191,11 +205,12 @@ function checkZone(now) {
       ? topo.zoneAt(welcome.zones, cam.x, cam.y)
       : topo.zoneAtStable(welcome.zones, cam.x, cam.y, welcome.world.chunkSize / 2);
   if (want < 0 || want === welcome.zone) return;
-  const sock = new WebSocket(zoneUrlFor(want));
+  const zurl = zoneUrlFor(want);
+  const sock = new WebSocket(zurl);
   sock.binaryType = 'arraybuffer';
   const sw = { ws: sock, zone: want, welcome: null, world: null, t: 0 };
   zoneSwitch = sw;
-  sock.onopen = () => sock.send(helloMessage());
+  sock.onopen = () => sock.send(helloMessage(zurl));
   sock.onmessage = (ev) => {
     if (zoneSwitch !== sw) return;
     if (typeof ev.data === 'string') {

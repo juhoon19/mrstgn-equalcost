@@ -502,3 +502,16 @@ test('registration proof of work: required, single use, unforgeable', async () =
   c.close();
   gw.close();
 });
+
+test('admin login throttles brute force from one IP', async () => {
+  // The gateway counts failed admin logins and returns 429 after 10 in a
+  // minute (on top of the meta per-name/IP throttle).
+  const hit = () =>
+    fetch(`http://127.0.0.1:${gw1.port}/admin/api/login`, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'ghost', password: 'nope' }),
+    }).then((r) => r.status);
+  let saw429 = false;
+  for (let i = 0; i < 16 && !saw429; i++) saw429 = (await hit()) === 429;
+  assert.ok(saw429, 'repeated bad admin logins are rate-limited (429)');
+});

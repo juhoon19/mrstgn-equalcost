@@ -13,7 +13,7 @@
 
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
-import { Link, readClusterConfig } from '../server/link.js';
+import { Link, readClusterConfig, assertClusterSecret, secretEqual } from '../server/link.js';
 import { openStore } from './store.js';
 import { Accounts } from './accounts.js';
 import { Economy } from './economy.js';
@@ -465,7 +465,7 @@ export async function startMeta(opts = {}) {
     const onMsg = (msg) => {
       if (!msg || typeof msg !== 'object') return;
       if (role === null) {
-        if (msg.t !== 'hello' || msg.secret !== secret) return ws.close(1008, 'bad hello');
+        if (msg.t !== 'hello' || !secretEqual(msg.secret, secret)) return ws.close(1008, 'bad hello');
         role = msg.role;
         if (role === 'gateway') {
           gwIds.set(ws, String(msg.id));
@@ -507,6 +507,7 @@ export async function startMeta(opts = {}) {
     });
     ws.on('error', () => {});
   });
+  assertClusterSecret({ host, secret, role: `meta ${id}` });
   await new Promise((r) => server.listen(port, host, r));
   log(`listening on ${host}:${port}`);
 

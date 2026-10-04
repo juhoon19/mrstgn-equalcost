@@ -133,6 +133,8 @@ TOPOLOGY='…' PORT=8080 CLUSTER_SECRET=… TOKEN_SECRET=… TRUST_PROXY=true no
 | `MESSAGE_RETENTION_DAYS` | 私信保留天数，过期自动删除（0 = 永久保留） | 365 |
 | `POW_BITS` | 注册工作量证明的难度（每 +1 计算量翻倍；0 = 关闭） | 16 |
 | `GUESTS_CAN_CHAT` | 设成 `false` 后只有登录玩家能聊天（游客仍然能玩） | true |
+| `SUB_BURST` / `SUB_REFILL` | 每个客户端订阅区块的突发额度 / 每 50ms 补充（默认约 80/秒）。防止单个客户端靠不停切换视野让网关把整张地图都拉过来 | 160 / 4 |
+| `ALLOW_DEV_SECRET` | 设成 `1` 才允许用内置默认 `CLUSTER_SECRET` 绑定到公网地址（仅限可信内网，强烈建议始终设置真正的 `CLUSTER_SECRET`） | 未设 |
 
 ## 运维后台与管理
 
@@ -184,7 +186,8 @@ Docker Compose 部署里，密钥（`CLUSTER_SECRET`、`TOKEN_SECRET`、`WORLD_I
 - [ ] 备份 `DATA_DIR`（Docker 里是每个分片的 `shardN_data` 卷）：那就是整个世界。
 - [ ] **定时运行 `scripts/backup.sh`，并把备份传到另一台机器 / 对象存储**；上线前做一次恢复演练（见上面“备份与恢复”）。
 - [ ] 第一个管理员账号设好后，所有管理人员开启两步验证。
-- [ ] 分片端口只在内网；防火墙只开 80/443。
+- [ ] 分片端口只在内网；防火墙只开 80/443。**绝不要把分片 / 账号服务端口暴露到公网**：内部进程之间只靠 `CLUSTER_SECRET` 互信，谁能连上内部端口并知道这个密钥，就能发币、封号、改管理员。直接运行 `shard-node.js` / `meta-node.js` / `gateway-node.js`（多机部署）时，如果用默认密钥又绑定到非回环地址，进程会**直接拒绝启动**并提示你设 `CLUSTER_SECRET`（`launch.js` 和 compose 已自动处理）。
+- [ ] 不要把 `?server=` 发给别人：客户端只会把登录凭证发给同源服务器，连到别的服务器只是游客身份，但仍不要点来历不明的 `?server=` 链接。
 - [ ] 走 HTTPS/WSS（Caddy/Cloudflare 自动处理）。
 - [ ] 在反代后面开 `TRUST_PROXY=true`，并按实际层数设 `PROXY_HOPS`（Caddy/Nginx 一层 = 1），或在 Cloudflare 后面设 `IP_HEADER=cf-connecting-ip`。否则单 IP 限制会误伤或被绕过。
 - [ ] 需要时设置 `ALLOWED_ORIGINS=https://你的域名`，防止别的网站嵌入你的服务器。
