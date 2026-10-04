@@ -59,14 +59,23 @@
 
     <div id="join" class="overlay">
       <div class="card">
-        <h1>原始汤</h1>
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <circle cx="16" cy="16" r="11" fill="#35d49a" />
+            <circle cx="19" cy="13" r="3" fill="#062" />
+          </svg>
+          <div class="brand-text">
+            <h1>原始汤</h1>
+            <span class="brand-sub">PRIMORDIAL SOUP</span>
+          </div>
+        </div>
         <p class="lead">一个任何人都能加入的二维生命演化世界。投放营养、播种你的谱系、搅动水流——看它们和所有人的生物一起竞争、变异、演化。</p>
-        <label>名字 <input id="join-name" maxlength="24" placeholder="给你的谱系起个名" /></label>
-        <label>颜色 <input id="join-hue" type="range" min="0" max="359" /></label>
+        <label>名字<input id="join-name" maxlength="24" placeholder="给你的谱系起个名" /></label>
+        <label>颜色<input id="join-hue" type="range" min="0" max="359" /></label>
         <div id="join-swatch"></div>
         <button id="join-go">以游客身份进入</button>
-        <p class="hint">进入后点右侧 👤 可以注册 / 登录：收集生物、交易、加好友。</p>
-        <p class="hint">滚轮 / 双指缩放 · 拖动平移 · 1–5 切换工具 · Enter 聊天</p>
+        <p class="hint">进入后点右侧 <b>👤</b> 可以注册 / 登录：收集生物、交易、加好友。</p>
+        <p class="hint dim">滚轮 / 双指缩放 · 拖动平移 · 1–5 切换工具 · Enter 聊天</p>
       </div>
     </div>
 

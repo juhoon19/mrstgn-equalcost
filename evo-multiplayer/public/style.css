@@ -221,79 +221,175 @@ body {
 .overlay {
   position: fixed;
   inset: 0;
+  z-index: 100; /* cover the game chrome (social bar, tools, minimap) */
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(4, 7, 10, 0.72);
-  padding: 16px;
+  padding: 20px;
+  /* A still frame of the live world behind a dark scrim for legibility. */
+  background:
+    radial-gradient(130% 90% at 72% 40%, rgba(4, 7, 10, 0) 0%, rgba(4, 7, 10, 0.45) 60%, rgba(4, 7, 10, 0.82) 100%),
+    linear-gradient(180deg, rgba(4, 7, 10, 0.55) 0%, rgba(4, 7, 10, 0.68) 100%),
+    url('bg-login.jpg') center / cover no-repeat;
+  animation: overlay-in 0.6s ease-out;
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .card {
-  width: min(420px, 100%);
-  background: #0e151d;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 22px;
+  position: relative;
+  width: min(430px, 100%);
+  background: rgba(10, 16, 22, 0.66);
+  border: 1px solid rgba(190, 220, 240, 0.14);
+  border-radius: 18px;
+  padding: 28px 26px 24px;
+  backdrop-filter: blur(20px) saturate(1.25);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  animation: card-in 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 
-.card h1 {
-  margin: 0 0 6px;
-  font-size: 24px;
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.brand-mark {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  filter: drop-shadow(0 0 10px rgba(53, 212, 154, 0.55));
+  animation: brand-pulse 3.2s ease-in-out infinite;
+}
+
+@keyframes brand-pulse {
+  50% {
+    filter: drop-shadow(0 0 18px rgba(53, 212, 154, 0.85));
+  }
+}
+
+.brand-text h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: 1px;
+  background: linear-gradient(90deg, #eafff6, var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.brand-sub {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 3px;
+  color: var(--muted);
+  margin-top: 1px;
 }
 
 .lead {
-  color: var(--muted);
-  margin: 0 0 16px;
+  color: #c2d2df;
+  font-size: 12.5px;
+  line-height: 1.6;
+  margin: 0 0 18px;
 }
 
 .card label {
   display: block;
-  margin: 10px 0;
+  margin: 12px 0 0;
   color: var(--muted);
+  font-size: 12px;
 }
 
 .card input[type='text'],
 .card input:not([type]) {
   display: block;
   width: 100%;
-  margin-top: 4px;
-  padding: 8px 10px;
-  background: #0a1016;
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: rgba(6, 11, 16, 0.75);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--text);
   font: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.card input:not([type]):focus,
+.card input[type='text']:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(53, 212, 154, 0.18);
 }
 
 .card input[type='range'] {
   display: block;
   width: 100%;
-  margin-top: 6px;
+  margin-top: 8px;
+  accent-color: var(--accent);
 }
 
 #join-swatch {
-  height: 8px;
-  border-radius: 4px;
-  margin-bottom: 14px;
+  height: 10px;
+  border-radius: 5px;
+  margin: 8px 0 18px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
 }
 
 #join-go {
   width: 100%;
-  padding: 10px;
+  padding: 12px;
   border: 0;
-  border-radius: 8px;
-  background: var(--accent);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #46e6ac, var(--accent));
   color: #042;
   font: inherit;
   font-weight: 700;
+  font-size: 14px;
   cursor: pointer;
+  box-shadow: 0 8px 24px rgba(53, 212, 154, 0.3);
+  transition: transform 0.12s, box-shadow 0.12s, filter 0.12s;
+}
+
+#join-go:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+  box-shadow: 0 12px 30px rgba(53, 212, 154, 0.42);
+}
+
+#join-go:active {
+  transform: translateY(0);
 }
 
 .hint {
   color: var(--muted);
   font-size: 11px;
   text-align: center;
+  line-height: 1.5;
   margin: 12px 0 0;
+}
+
+.hint.dim {
+  color: #5f7382;
+  margin-top: 6px;
+}
+
+.hint b {
+  color: var(--text);
 }
 
 /* ------------------------------------------------ accounts & social */
