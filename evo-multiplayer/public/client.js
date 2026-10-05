@@ -104,6 +104,20 @@ function join() {
   connect();
 }
 
+// A one-time welcome coach: a guest who lands in a field of drifting dots
+// should know what the tools do and that an account saves their progress.
+// Shown once (localStorage flag), after the first connection, dismissible.
+function dismissCoach() {
+  store.set('coached', '1');
+  $('coach').classList.add('hidden');
+}
+$('coach-close').addEventListener('click', dismissCoach);
+$('coach-go').addEventListener('click', dismissCoach);
+function maybeCoach() {
+  if (store.get('coached', '') === '1') return;
+  $('coach').classList.remove('hidden');
+}
+
 // ------------------------------------------------------------- networking
 function wsUrl() {
   const q = new URLSearchParams(location.search).get('server');
@@ -344,6 +358,7 @@ function onWelcome(msg) {
   viewDirty = true;
   setStatus(msg.zones && msg.zone >= 0 ? `在线 · ${msg.zone + 1} 区` : '在线');
   social.onWelcome(msg);
+  if (first) maybeCoach();
 }
 
 function onStats(msg) {
